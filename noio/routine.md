@@ -1,14 +1,20 @@
-Routines
+Routine
 ========
 
-Use `@noio.routine` when your implementation is an async function. Call it normally from regular functions, or await its `.a()` version from async functions. Regular functions need no decorator.
+Start with regular functions, which need no decorator.
+When a function also needs to support coroutine libraries,
+write its implementation as an async function decorated with `@noio.routine`.
+Existing callers can continue calling it normally.
 
-Inside an async function, use `await function.a(...)` to call `noio` routines.
+Inside a routine, use `await function.a(...)` to call other routines.
 
 Methods
 -------
 
-The `@routine` decorator works on methods. If you're using it on a classmethod or staticmethod, be sure to put classmethod or staticmethod directly above the function, and this decorator above that.
+The `@routine` decorator works on methods.
+If you're using it on a classmethod or staticmethod,
+be sure to put classmethod or staticmethod directly above the function,
+and this decorator above that.
 
 ```python
 import asyncio

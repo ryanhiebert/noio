@@ -4,7 +4,9 @@ version = "0.1.0.dev0"
 description = "Experimental coroutine libraries for ordinary-function applications"
 readme = "README.md"
 requires-python = ">=3.15"
-dependencies = []
+dependencies = [
+    "aiologic>=0.17.1",
+]
 
 [dependency-groups]
 dev = [

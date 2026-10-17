@@ -10,6 +10,7 @@ from typing import cast
 from typing import overload
 
 _in_coroutine: ContextVar[bool] = ContextVar("noio.in_coroutine", default=False)
+_sync_call: ContextVar[bool] = ContextVar("noio.sync_call", default=False)
 
 
 class Routine[**P, R]:
@@ -44,6 +45,7 @@ class Routine[**P, R]:
         if _in_coroutine.get():
             raise RuntimeError("Use await function.a(...) inside a routine")
         iterator = self.a(*args, **kwargs).__await__()
+        token = _sync_call.set(True)
         try:
             iterator.send(None)
         except StopIteration as stop:
@@ -53,7 +55,10 @@ class Routine[**P, R]:
                 "Suspension in ordinary routine calls is not implemented."
             )
         finally:
-            iterator.close()
+            try:
+                iterator.close()
+            finally:
+                _sync_call.reset(token)
 
     @overload
     def __get__[T, **B](
