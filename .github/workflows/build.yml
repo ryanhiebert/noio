@@ -1,6 +1,9 @@
 name: Build
 
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -38,3 +41,23 @@ jobs:
         run: |
           uv build
           uv run --isolated --no-project --with dist/noio-*.whl python -I -c "import noio"
+      - name: Verify release version
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          uv run python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          assert os.environ["RELEASE_TAG"] == version, "Release tag must match package version"
+          PY
+      - name: Upload distributions
+        if: github.event_name == 'release' && matrix.python == '3.15'
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
