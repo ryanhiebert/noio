@@ -1,3 +1,6 @@
+from collections.abc import AsyncIterator
+from collections.abc import Iterable
+from contextlib import AsyncExitStack
 from types import TracebackType
 from typing import Self
 
@@ -5,6 +8,7 @@ import aiologic
 from aiologic.lowlevel import current_async_library
 
 from ._contextlib import ContextManager
+from ._contextlib import contextmanager
 from .routine import _sync_call
 from .routine import routine
 
@@ -40,3 +44,13 @@ class Lock(ContextManager["Lock", None]):
 
     async def __aenter__(self) -> Self:
         return await self.__enter__.a()
+
+
+@contextmanager
+async def acquire(locks: Iterable[Lock]) -> AsyncIterator[None]:
+    """Acquire distinct locks in identity order and release in reverse order."""
+    ordered = sorted(set(locks), key=id)
+    async with AsyncExitStack() as stack:
+        for lock in ordered:
+            await stack.enter_async_context(lock)
+        yield

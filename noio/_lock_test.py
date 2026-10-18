@@ -1,14 +1,18 @@
+from collections.abc import Awaitable
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AsyncExitStack
 from contextlib import ExitStack
 from threading import Event
+from types import TracebackType
+from typing import Self
 from typing import assert_type
 
 import pytest
 
 from noio import routine
 from noio._lock import Lock
+from noio._lock import acquire
 
 from .conftest import AsyncRuntime
 from .conftest import RunSync
@@ -356,3 +360,237 @@ def test_cancellation_while_waiting_and_holding(backend: str) -> None:
             pass
 
     anyio.run(main, backend=backend)
+
+
+class RecordedLock(Lock):
+    def __init__(self, calls: list[tuple[str, Lock]]) -> None:
+        super().__init__()
+        self.__calls = calls
+
+    async def __aenter__(self) -> Self:
+        await super().__aenter__()
+        self.__calls.append(("enter", self))
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await super().__aexit__(exc_type, exc_value, traceback)
+        self.__calls.append(("exit", self))
+
+
+@routine
+async def exercise_acquire(checkpoint: Callable[[], Awaitable[None]]) -> None:
+    calls: list[tuple[str, Lock]] = []
+    first, second = sorted([RecordedLock(calls), RecordedLock(calls)], key=id)
+    async with acquire(iter([second, first, second])) as value:
+        assert assert_type(value, None) is None
+        assert calls == [("enter", first), ("enter", second)]
+        await checkpoint()
+    assert calls == [
+        ("enter", first),
+        ("enter", second),
+        ("exit", second),
+        ("exit", first),
+    ]
+    async with acquire([]):
+        pass
+
+    error = ValueError("body")
+    with pytest.raises(ValueError) as raised:
+        async with acquire([second, first]):
+            raise error
+    assert raised.value is error
+    assert calls[-2:] == [("exit", second), ("exit", first)]
+
+    # Failing on the second lock must release the first, but not the outer lock.
+    async with second:
+        calls.clear()
+        with pytest.raises(RuntimeError):
+            async with acquire([second, first]):
+                pytest.fail("reacquisition must fail")
+        assert calls == [("enter", first), ("exit", first)]
+        async with first:
+            pass
+        with pytest.raises(RuntimeError):
+            async with second:
+                pass
+    async with acquire([first, second]):
+        pass
+
+
+def _check_acquire_sync(checkpoint: Callable[[], None]) -> None:
+    async def green_checkpoint() -> None:
+        checkpoint()
+
+    exercise_acquire(green_checkpoint)
+    locks = [Lock(), Lock()]
+    with acquire(locks) as value:
+        assert assert_type(value, None) is None
+        checkpoint()
+
+
+def test_acquire_sync(sync_runtime: RunSync) -> None:
+    sync_runtime(_check_acquire_sync)
+
+
+def test_acquire_async(async_runtime: AsyncRuntime) -> None:
+    async def main() -> None:
+        await exercise_acquire.a(async_runtime.checkpoint)
+
+    async_runtime.run(main)
+
+
+@pytest.mark.parametrize("backend", ["asyncio", "trio"])
+def test_acquire_cancel_partial_acquisition(backend: str) -> None:
+    import anyio
+
+    async def main() -> None:
+        acquired = anyio.Event()
+        finished = anyio.Event()
+        calls: list[tuple[str, Lock]] = []
+
+        class SignallingLock(RecordedLock):
+            async def __aenter__(self) -> Self:
+                await super().__aenter__()
+                acquired.set()
+                return self
+
+        first, second = sorted([SignallingLock(calls), SignallingLock(calls)], key=id)
+        scope = anyio.CancelScope()
+
+        async def waiter() -> None:
+            with scope:
+                async with acquire([second, first]):
+                    pytest.fail("second lock is held")
+            finished.set()
+
+        async with anyio.create_task_group() as group, second:
+            acquired = anyio.Event()
+            calls.clear()
+            group.start_soon(waiter)
+            await acquired.wait()
+            assert calls == [("enter", first)]
+            scope.cancel()
+            await finished.wait()
+            assert calls == [("enter", first), ("exit", first)]
+            async with first:
+                pass
+        async with acquire([first, second]):
+            pass
+
+    anyio.run(main, backend=backend)
+
+
+def test_acquire_thread_and_async_handoff(async_runtime: AsyncRuntime) -> None:
+    locks = [Lock(), Lock()]
+    held = Event()
+    release = Event()
+    calls: list[str] = []
+
+    def worker() -> None:
+        with acquire(locks):
+            held.set()
+            assert release.wait(5)
+            calls.append("thread")
+
+    async def main() -> None:
+        while not held.is_set():
+            await async_runtime.checkpoint()
+
+        async def signal() -> None:
+            await async_runtime.checkpoint()
+            release.set()
+
+        async def waiter() -> None:
+            async with acquire(reversed(locks)):
+                calls.append("async")
+                await async_runtime.checkpoint()
+
+        await async_runtime.concurrently(waiter, signal)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(worker)
+        try:
+            async_runtime.run(main)
+        finally:
+            release.set()
+        future.result(timeout=5)
+    assert calls == ["thread", "async"]
+
+
+def test_acquire_competing_orders(async_runtime: AsyncRuntime) -> None:
+    async def main() -> None:
+        paused = async_runtime.event()
+        resume = async_runtime.event()
+        owner_waiting = False
+        completed: list[str] = []
+
+        class InterleavedLock(Lock):
+            async def __aenter__(self) -> Self:
+                nonlocal owner_waiting
+                if owner_waiting:
+                    owner_waiting = False
+                    resume.set()
+                    # The contender must wait on the first lock, not take the second.
+                    assert self is first
+                elif self is second and not completed:
+                    owner_waiting = True
+                    paused.set()
+                    await resume.wait()
+                return await super().__aenter__()
+
+        first, second = sorted([InterleavedLock(), InterleavedLock()], key=id)
+
+        async def owner() -> None:
+            async with acquire([first, second]):
+                completed.append("owner")
+
+        async def contender() -> None:
+            await paused.wait()
+            async with acquire([second, first]):
+                completed.append("contender")
+
+        await async_runtime.concurrently(owner, contender)
+        assert completed == ["owner", "contender"]
+
+    async_runtime.run(main)
+
+
+def _check_acquire_green_cancellation(checkpoint: Callable[[], None]) -> None:
+    import gevent
+
+    calls: list[tuple[str, Lock]] = []
+    first, second = sorted([RecordedLock(calls), RecordedLock(calls)], key=id)
+
+    def waiter() -> None:
+        with acquire([second, first]):
+            pytest.fail("second lock is held")
+
+    with second:
+        task = gevent.spawn(waiter)
+        try:
+            checkpoint()
+            assert not task.dead
+            assert calls == [("enter", first)]
+        finally:
+            task.kill()
+        assert calls == [("enter", first), ("exit", first)]
+        with first:
+            pass
+        with pytest.raises(RuntimeError), second:
+            pass
+    with acquire([first, second]):
+        pass
+
+
+@pytest.mark.parametrize(
+    "sync_runtime",
+    ["gevent", "gevent-patched-before-import", "gevent-patched-after-import"],
+    indirect=True,
+)
+def test_acquire_green_cancellation(sync_runtime: RunSync) -> None:
+    sync_runtime(_check_acquire_green_cancellation)
