@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
+Unreleased
+----------
+
+### Added
+
+- `@noio.contextmanager` to create context managers supporting both
+  `with` and `async with` from an async generator.
+  Context managers can also decorate existing routines.
+- `noio.ContextManager` as an abstract base class
+  for context managers with routine entry and exit methods.
+
 [0.1] - 2026-10-17
 -----------------
 

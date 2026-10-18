@@ -61,6 +61,15 @@ Finding all the places to convert can be tricky,
 so `noio` will raise an error
 if a routine implementation calls another routine with a regular function call.
 
+Context managers
+----------------
+
+Use `@noio.contextmanager` on an async generator
+to support both `with` and `async with`.
+For class implementations,
+inherit from `noio.ContextManager`.
+See [context managers](noio/contextlib.md) for usage.
+
 Contributing
 ------------
 
