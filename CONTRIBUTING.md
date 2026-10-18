@@ -34,6 +34,13 @@ make sure the implementation will work whether it is patched or not.
 Every bug fix must include a regression test
 that fails without the fix and passes with it.
 
+Keep tests in the corresponding module's test file.
+For example, test helpers defined in `_lock.py` in `_lock_test.py`.
+
+For concurrency behavior, prefer deterministic interleavings
+that exercise the intended race.
+A handoff test alone does not establish safety during competing partial acquisitions.
+
 Record user-facing changes in `CHANGELOG.md` under an Unreleased section,
 creating that section when needed.
 At release time, turn it into a dated version entry.
