@@ -1,7 +1,10 @@
 import asyncio
+from abc import ABC
+from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Coroutine
 from contextvars import ContextVar
+from functools import partial
 from inspect import signature
 from inspect import unwrap
 from threading import get_ident
@@ -18,6 +21,65 @@ from .conftest import AsyncRuntime
 from .conftest import RunSync
 from .conftest import SyncCheck
 from .routine import _in_coroutine as in_coroutine
+
+
+def test_abstract_routine(async_runtime: AsyncRuntime):
+    class Base(ABC):
+        @routine
+        @abstractmethod
+        async def calculate(self, value: int) -> int:
+            return value * 2
+
+    class Incomplete(Base):
+        pass
+
+    for cls in (Base, Incomplete):
+        with pytest.raises(TypeError, match="abstract"):
+            cls()  # pyright: ignore[reportAbstractUsage]
+
+    class Concrete(Base):
+        @routine
+        async def calculate(self, value: int) -> int:  # pyright: ignore[reportIncompatibleVariableOverride]
+            return await super().calculate.a(value) + 1
+
+    class Child(Concrete):
+        pass
+
+    def ordinary(instance: Base) -> int:
+        return assert_type(instance.calculate(3), int)
+
+    async def awaited(instance: Base) -> int:
+        return assert_type(await instance.calculate.a(3), int)
+
+    for instance in (Concrete(), Child()):
+        assert ordinary(instance) == 7
+        assert async_runtime.run(partial(awaited, instance)) == 7
+
+
+@pytest.mark.parametrize("descriptor", [classmethod, staticmethod])
+def test_abstract_routine_descriptors(descriptor: Any):
+    async def abstract(*args: object) -> int:
+        raise NotImplementedError
+
+    class Base(ABC):  # noqa: B024
+        method = routine(descriptor(abstractmethod(abstract)))
+
+    class Incomplete(Base):
+        pass
+
+    for cls in (Base, Incomplete):
+        assert cls.__abstractmethods__ == {"method"}
+        with pytest.raises(TypeError, match="abstract"):
+            cls()
+
+    async def concrete(*args: object) -> int:
+        return 42
+
+    class Concrete(Base):
+        method = routine(descriptor(concrete))
+
+    assert Concrete().method() == 42
+    assert asyncio.run(Concrete.method.a()) == 42
 
 
 def test_routine_rejects_regular_functions():
