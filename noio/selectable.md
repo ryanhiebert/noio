@@ -10,6 +10,37 @@ can still win and complete them with a value or an exception.
 from noio.selectable import SelectorGuard, selectors
 ```
 
+Registration and cleanup
+------------------------
+
+`Selectable[T]` from `noio.select` describes an operation that can complete with a value of type `T`.
+Implement `__select__(self, guard)` to register the supplied `SelectorGuard[T]`
+and return a callable taking no arguments for cleanup.
+Registration may complete the choice immediately or retain its guard for later.
+
+Ordinary selection calls registration and cleanup directly.
+For async runtimes, decorate `__select__` and the cleanup function with `@noio.routine`.
+Async selection checks all registration methods before calling any of them
+and raises `TypeError` if one is not a routine.
+The selectable is responsible for returning a valid cleanup
+and for undoing any partial registration if its registration method raises or is cancelled.
+
+Cleanup runs once for every successfully returned cleanup callback,
+including the winning choice, in reverse registration order.
+Before calling any cleanup, selection makes all its guards unavailable
+and finishes any registration that is still running or unwinding.
+This prevents a later registration from inserting an entry after its final cleanup.
+A cleanup callback may remove retained registrations or do nothing
+if the selectable discards unavailable registrations when it encounters them.
+
+Runtime cancellation propagates even if a choice has already completed.
+Completion is not undone, but the caller does not receive its result.
+Invalidating the guards is protected from cancellation;
+cleanup callbacks run in the caller's context and must handle their own cancellation needs.
+Cleanup callbacks are invoked without checking their types first.
+An invalid callback fails when cleanup attempts to call it
+or await its `.a()` method.
+
 Completing a choice
 -------------------
 

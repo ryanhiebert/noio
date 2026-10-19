@@ -10,6 +10,8 @@ Unreleased
 
 ### Added
 
+- `noio.select.select` to wait for one of several selectable operations.
+
 - `noio.cleared_mode` to adapt an ordinary callable
   to clear the coroutine execution mode before calling it,
   then restore the previous mode when the function completes.

@@ -70,6 +70,12 @@ For class implementations,
 inherit from `noio.ContextManager`.
 See [context managers](noio/contextlib.md) for usage.
 
+Selection
+---------
+
+Use `select` from `noio.select` to wait for one of several selectable operations.
+See [selection](noio/select.md) for usage.
+
 Contributing
 ------------
 

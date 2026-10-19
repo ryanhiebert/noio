@@ -2,6 +2,8 @@
 
 from typing import cast
 
+from aiologic.lowlevel import shield
+
 from ._event import Event
 from ._lock import Lock
 from .routine import routine
@@ -38,13 +40,22 @@ class _Selection[T]:
         self._event.set()
 
     @routine
-    async def invalidate(self) -> None:
+    async def invalidate(self) -> None:  # pyright: ignore[reportRedeclaration]
         """Make every choice ineligible, preserving any committed outcome.
 
-        The lifecycle owner must ensure this private operation finishes even
-        during cancellation, before invoking registration cleanup callbacks.
         It does not notify waiters: invalidation is not an outcome.
         """
+        await shield(self._invalidate_async())
+
+    @invalidate.fn
+    def invalidate(self) -> None:
+        shield(self._invalidate_sync)()
+
+    def _invalidate_sync(self) -> None:
+        with self._lock:
+            self._pending = False
+
+    async def _invalidate_async(self) -> None:
         async with self._lock:
             self._pending = False
 
