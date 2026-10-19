@@ -20,6 +20,9 @@ Before adding a dependency, check that its license is compatible with
 distributing noio under the MIT license.
 Check any attribution or license notice requirements as well.
 
+Keep module dependencies acyclic.
+Do not hide dependency cycles with local imports or `TYPE_CHECKING` guards.
+
 Design primitives so the same instance can be shared across supported runtimes,
 including runtimes running concurrently in different threads.
 Where applicable, test interaction between runtimes,

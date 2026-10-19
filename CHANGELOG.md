@@ -10,6 +10,9 @@ Unreleased
 
 ### Added
 
+- `noio.selectable.Selector`, `SelectorGuard`, and `selectors()`
+  for acquiring selection guards together and completing selectable operations.
+  `SelectionCollisionError` rejects guards belonging to the same selection.
 - `@noio.contextmanager` to create context managers supporting both
   `with` and `async with` from an async generator.
   Context managers can also decorate existing routines.
