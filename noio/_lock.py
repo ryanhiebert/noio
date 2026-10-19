@@ -9,7 +9,8 @@ from aiologic.lowlevel import current_async_library
 
 from ._contextlib import ContextManager
 from ._contextlib import contextmanager
-from .routine import _sync_call
+from .routine import _Mode
+from .routine import _mode
 from .routine import routine
 
 
@@ -22,7 +23,7 @@ class Lock(ContextManager["Lock", None]):
     @routine
     async def __enter__(self) -> Self:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Wait for ownership; reacquiring raises RuntimeError."""
-        if _sync_call.get():
+        if _mode.get() is _Mode.DRIVEN:
             self.__lock.green_acquire()
         else:
             await self.__lock.async_acquire()

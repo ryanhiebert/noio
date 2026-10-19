@@ -10,6 +10,24 @@ Unreleased
 
 ### Added
 
+- `noio.cleared_mode` to adapt an ordinary callable
+  to clear the coroutine execution mode before calling it,
+  then restore the previous mode when the function completes.
+  The mode is set automatically when entering a routine,
+  so coroutine implementations can call the `.a()` versions
+  without needing to know whether they are being driven by an ordinary call or an async runtime.
+  Clearing this allows the callable to establish a new mode,
+  such as when calling into another IO runtime.
+  It supports both decorator and call-site forms.
+
+- `Routine.fn` to provide an ordinary-function implementation
+  while retaining the coroutine implementation for async runtimes.
+  Ordinary calls use this implementation,
+  as do awaited `.a()` calls within a coroutine driven by an ordinary call.
+  Like `cleared_mode`, it clears the mode before calling the function,
+  then restores the previous mode when the function completes.
+  The override may accept broader arguments while preserving `.a()`'s signature.
+
 - `noio.selectable.Selector`, `SelectorGuard`, and `selectors()`
   for acquiring selection guards together and completing selectable operations.
   `SelectionCollisionError` rejects guards belonging to the same selection.

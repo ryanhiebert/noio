@@ -1,6 +1,7 @@
 import aiologic
 
-from .routine import _sync_call
+from .routine import _Mode
+from .routine import _mode
 from .routine import routine
 
 
@@ -13,7 +14,7 @@ class Event:
 
     @routine
     async def wait(self) -> None:
-        if _sync_call.get():
+        if _mode.get() is _Mode.DRIVEN:
             self.__event.wait()
         else:
             await self.__event
