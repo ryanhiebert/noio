@@ -72,3 +72,15 @@ class _Selection[T]:
         if error is not None:
             raise error
         return index, cast(T, value)
+
+
+class SelectorGuard[T]:
+    """A choice accepting a result of type T, retained while an operation waits.
+
+    Obtain temporary permission to complete it with ``selectors(guard)``.
+    Guards are supplied by selection machinery, not constructed by selectables.
+    """
+
+    def __init__(self, selection: _Selection[T], index: int) -> None:
+        self._selection = selection
+        self._index = index

@@ -8,31 +8,34 @@ does not roll back if the selectable implementation subsequently raises.
 """
 
 from collections.abc import AsyncIterator
+from collections.abc import Callable
+from functools import update_wrapper
+from inspect import iscoroutinefunction
 from typing import Any
+from typing import Concatenate
+from typing import Protocol
+from typing import cast
 from typing import overload
 
 from ._contextlib import ContextManager
 from ._contextlib import contextmanager
 from ._lock import acquire
-from ._selection import _Selection
+from ._selection import SelectorGuard as SelectorGuard
+from .routine import Routine
+from .routine import routine
+from .select import select
 
-__all__ = ["SelectionCollisionError", "Selector", "SelectorGuard", "selectors"]
+__all__ = [
+    "SelectionCollisionError",
+    "Selector",
+    "SelectorGuard",
+    "selectable",
+    "selectors",
+]
 
 
 class SelectionCollisionError(ValueError):
     """Raised when acquiring multiple guards belonging to one selection."""
-
-
-class SelectorGuard[T]:
-    """A choice accepting a result of type T, retained while an operation waits.
-
-    Obtain temporary permission to complete it with ``selectors(guard)``.
-    Guards are supplied by selection machinery, not constructed by selectables.
-    """
-
-    def __init__(self, selection: _Selection[T], index: int) -> None:
-        self._selection = selection
-        self._index = index
 
 
 class Selector[T]:
@@ -121,3 +124,177 @@ async def selectors(
             for selector in acquired:
                 if selector is not None:
                     selector._active = False
+
+
+class _Operation[T]:
+    def __init__(
+        self,
+        register: Callable[..., Callable[[], None] | None],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        unbound: bool,
+    ) -> None:
+        self._register = register
+        self._args = args
+        self._kwargs = kwargs
+        self._unbound = unbound
+
+    def _arguments(self, guard: SelectorGuard[T]) -> tuple[Any, ...]:
+        if self._unbound:
+            return self._args[:1] + (guard,) + self._args[1:]
+        return (guard, *self._args)
+
+    def __select__(self, guard: SelectorGuard[T], /) -> Callable[[], None] | None:
+        return self._register(*self._arguments(guard), **self._kwargs)
+
+
+class _RoutineOperation[T]:
+    def __init__(
+        self,
+        register: Routine[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        unbound: bool,
+    ) -> None:
+        self._register = register
+        self._args = args
+        self._kwargs = kwargs
+        self._unbound = unbound
+
+    @routine
+    async def __select__(self, guard: SelectorGuard[T], /) -> Callable[[], None] | None:
+        args = (
+            self._args[:1] + (guard,) + self._args[1:]
+            if self._unbound
+            else (guard, *self._args)
+        )
+        return await self._register.a(*args, **self._kwargs)
+
+
+class _UnboundCall[**P, T](Protocol):
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T: ...
+    def select(self, *args: P.args, **kwargs: P.kwargs) -> _Operation[T]: ...
+
+
+class _UnboundRoutineCall[**P, T](Protocol):
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T: ...
+    async def a(self, *args: P.args, **kwargs: P.kwargs) -> T: ...
+    def select(self, *args: P.args, **kwargs: P.kwargs) -> _RoutineOperation[T]: ...
+
+
+class _SelectableCall[**P]:
+    def __init__(
+        self, register: Callable[P, Callable[[], None] | None], *, unbound: bool = False
+    ) -> None:
+        self._register = register
+        self._unbound = unbound
+        update_wrapper(cast(Callable[..., Any], self), register)
+
+    def select[**A, T](
+        self: _SelectableCall[Concatenate[SelectorGuard[T], A]],
+        *args: A.args,
+        **kwargs: A.kwargs,
+    ) -> _Operation[T]:
+        return _Operation(self._register, args, kwargs, self._unbound)
+
+    def __call__[**A, T](
+        self: _SelectableCall[Concatenate[SelectorGuard[T], A]],
+        *args: A.args,
+        **kwargs: A.kwargs,
+    ) -> T:
+        return select(self.select(*args, **kwargs))[1]
+
+    @overload
+    def __get__[O, **A, T](
+        self: _SelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        instance: None,
+        owner: type[O],
+    ) -> _UnboundCall[Concatenate[O, A], T]: ...
+
+    @overload
+    def __get__[O, **A, T](
+        self: _SelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        instance: O,
+        owner: type[O] | None = None,
+    ) -> _SelectableCall[Concatenate[SelectorGuard[T], A]]: ...
+
+    def __get__(self, instance: Any, owner: type[Any] | None = None) -> Any:
+        if instance is None:
+            return type(self)(self._register, unbound=True)
+        return type(self)(self._register.__get__(instance, owner))
+
+
+class _RoutineSelectableCall[**P]:
+    def __init__(self, register: Routine[P, Any], *, unbound: bool = False) -> None:
+        self._register = register
+        self._unbound = unbound
+        update_wrapper(cast(Callable[..., Any], self), register)
+
+    def select[**A, T](
+        self: _RoutineSelectableCall[Concatenate[SelectorGuard[T], A]],
+        *args: A.args,
+        **kwargs: A.kwargs,
+    ) -> _RoutineOperation[T]:
+        return _RoutineOperation(self._register, args, kwargs, self._unbound)
+
+    def __call__[**A, T](
+        self: _RoutineSelectableCall[Concatenate[SelectorGuard[T], A]],
+        *args: A.args,
+        **kwargs: A.kwargs,
+    ) -> T:
+        return select(self.select(*args, **kwargs))[1]
+
+    async def a[**A, T](
+        self: _RoutineSelectableCall[Concatenate[SelectorGuard[T], A]],
+        *args: A.args,
+        **kwargs: A.kwargs,
+    ) -> T:
+        return (await select.a(self.select(*args, **kwargs)))[1]
+
+    @overload
+    def __get__[O, **A, T](
+        self: _RoutineSelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        instance: None,
+        owner: type[O],
+    ) -> _UnboundRoutineCall[Concatenate[O, A], T]: ...
+
+    @overload
+    def __get__[O, **A, T](
+        self: _RoutineSelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        instance: O,
+        owner: type[O] | None = None,
+    ) -> _RoutineSelectableCall[Concatenate[SelectorGuard[T], A]]: ...
+
+    def __get__(self, instance: Any, owner: type[Any] | None = None) -> Any:
+        if instance is None:
+            return type(self)(self._register, unbound=True)
+        return type(self)(self._register.__get__(instance, owner))
+
+
+@overload
+# Routine is callable too, but its wrapper additionally exposes .a().
+def selectable[**P, C: Callable[[], None] | None](  # pyright: ignore[reportOverlappingOverload]
+    register: Routine[P, C],
+) -> _RoutineSelectableCall[P]: ...
+
+
+@overload
+def selectable[**P](
+    register: Callable[P, Callable[[], None] | None],
+) -> _SelectableCall[P]: ...
+
+
+def selectable(register: Any) -> Any:
+    """Make registration callable directly or preparable with .select().
+
+    Wrap a routine to also support .a() and async selection.
+    Registration receives the guard before the caller's arguments, after self
+    for methods, and returns a cleanup callback or None.
+    """
+    if iscoroutinefunction(register):
+        raise TypeError(
+            "Wrap coroutine implementations with @routine before applying @selectable."
+        )
+    if isinstance(register, Routine):
+        return _RoutineSelectableCall(register)
+    return _SelectableCall(register)

@@ -1,5 +1,6 @@
 from collections.abc import Awaitable
 from collections.abc import Callable
+from typing import Any
 from typing import Self
 from typing import assert_type
 
@@ -9,6 +10,8 @@ import pytest
 from noio import routine
 from noio._lock import Lock
 from noio._selection import _Selection
+from noio.routine import Routine
+from noio.select import select
 from noio.selectable import SelectionCollisionError
 from noio.selectable import Selector
 from noio.selectable import SelectorGuard
@@ -296,3 +299,339 @@ def _check_green_cancellation(checkpoint: Callable[[], None]) -> None:
 )
 def test_green_cancellation(sync_runtime: RunSync) -> None:
     sync_runtime(_check_green_cancellation)
+
+
+def _check_selectable_functions_and_methods(checkpoint: Callable[[], None]) -> None:
+    from .selectable import selectable
+
+    log: list[str] = []
+
+    @selectable
+    def operation(
+        guard: SelectorGuard[int], value: int, *, scale: int = 2
+    ) -> Callable[[], None]:
+        log.append("register")
+        with selectors(guard) as (selector,):
+            assert selector is not None
+            selector.result(value * scale)
+        return lambda: log.append("cleanup")
+
+    prepared = operation.select(3, scale=4)
+    assert not log
+    assert assert_type(select(prepared), tuple[int, int]) == (0, 12)
+    assert assert_type(operation(3), int) == 6
+    assert log == ["register", "cleanup"] * 2
+    assert not hasattr(operation, "a")
+
+    class Counter:
+        def __init__(self, offset: int):
+            self.offset = offset
+
+        @selectable
+        def calculate(
+            self, guard: SelectorGuard[int], value: int, *, scale: int = 2
+        ) -> Callable[[], None]:
+            with selectors(guard) as (selector,):
+                assert selector is not None
+                selector.result(self.offset + value * scale)
+            return lambda: None
+
+    class Child(Counter):
+        pass
+
+    first, second = Counter(10), Child(20)
+    assert assert_type(first.calculate(3), int) == 16
+    assert assert_type(second.calculate(3, scale=4), int) == 32
+    assert assert_type(Counter.calculate(first, 3), int) == 16
+    assert assert_type(select(second.calculate.select(3)), tuple[int, int]) == (0, 26)
+    assert select(Counter.calculate.select(second, 3)) == (0, 26)
+    checkpoint()
+
+
+def test_selectable_functions_and_methods(sync_runtime: RunSync) -> None:
+    sync_runtime(_check_selectable_functions_and_methods)
+
+
+def test_selectable_routine_functions_and_methods(async_runtime: AsyncRuntime) -> None:
+    from .selectable import selectable
+
+    log: list[str] = []
+
+    @routine
+    async def cleanup() -> None:
+        log.append("cleanup")
+
+    @selectable
+    @routine
+    async def operation(
+        guard: SelectorGuard[int], value: int, *, scale: int = 2
+    ) -> Routine[[], None]:
+        log.append("register")
+        async with selectors(guard) as (selector,):
+            assert selector is not None
+            selector.result(value * scale)
+        return cleanup
+
+    class Counter:
+        def __init__(self, offset: int):
+            self.offset = offset
+
+        @selectable
+        @routine
+        async def calculate(
+            self, guard: SelectorGuard[int], value: int, *, scale: int = 2
+        ) -> Routine[[], None]:
+            async with selectors(guard) as (selector,):
+                assert selector is not None
+                selector.result(self.offset + value * scale)
+            return cleanup
+
+    class Child(Counter):
+        pass
+
+    first, second = Counter(10), Child(20)
+    assert assert_type(operation(3), int) == 6
+    assert assert_type(first.calculate(3), int) == 16
+    assert assert_type(Counter.calculate(first, 3), int) == 16
+    log.clear()
+
+    @routine
+    async def main() -> None:
+        prepared = operation.select(3, scale=4)
+        call = operation.a(3)
+        assert not log
+        assert assert_type(await call, int) == 6
+        assert assert_type(await select.a(prepared), tuple[int, int]) == (0, 12)
+        assert log == ["register", "cleanup"] * 2
+        assert assert_type(await first.calculate.a(3), int) == 16
+        assert assert_type(await second.calculate.a(3, scale=4), int) == 32
+        assert assert_type(await Counter.calculate.a(first, 3), int) == 16
+        assert assert_type(
+            await select.a(second.calculate.select(3)), tuple[int, int]
+        ) == (0, 26)
+        assert await select.a(Counter.calculate.select(second, 3)) == (0, 26)
+        with pytest.raises(RuntimeError, match="Use await"):
+            operation(3)
+
+    async_runtime.run(main.a)
+
+
+def test_selectable_rejects_bare_coroutine() -> None:
+    from .selectable import selectable
+
+    async def registration(guard: SelectorGuard[int]) -> Callable[[], None]:
+        return lambda: None
+
+    invalid: Any = registration
+    with pytest.raises(
+        TypeError,
+        match="Wrap coroutine implementations with @routine",
+    ):
+        selectable(invalid)
+
+
+def test_selectable_prepared_operation_shared_across_runtimes(
+    async_runtime: AsyncRuntime,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from ._event import Event
+    from .selectable import selectable
+
+    entered, release = Event(), Event()
+    lock = Lock()
+    guards: list[SelectorGuard[int]] = []
+    cleaned: list[SelectorGuard[int]] = []
+
+    @selectable
+    @routine
+    async def operation(guard: SelectorGuard[int], value: int) -> Routine[[], None]:
+        async with lock:
+            guards.append(guard)
+            first = len(guards) == 1
+        if first:
+            entered.set()
+            await release.wait.a()
+        async with selectors(guard) as (selector,):
+            assert selector is not None
+            selector.result(value)
+
+        @routine
+        async def cleanup() -> None:
+            async with selectors(guard) as (selector,):
+                assert selector is None
+            async with lock:
+                cleaned.append(guard)
+
+        return cleanup
+
+    prepared = operation.select(42)
+    assert not guards
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(select, prepared)
+        entered.wait()
+        try:
+
+            async def main() -> None:
+                assert await select.a(prepared) == (0, 42)
+                assert len(cleaned) == 1
+
+            async_runtime.run(main)
+        finally:
+            release.set()
+        assert future.result(timeout=5) == (0, 42)
+    assert len(guards) == len(cleaned) == 2
+    assert guards[0] is not guards[1]
+
+
+@pytest.mark.parametrize("backend", ["asyncio", "trio"])
+def test_selectable_direct_call_cancellation_cleans_up(backend: str) -> None:
+    from .selectable import selectable
+
+    async def main() -> None:
+        registered = anyio.Event()
+        cleaned: list[bool] = []
+
+        @selectable
+        @routine
+        async def operation(guard: SelectorGuard[int], value: int) -> Routine[[], None]:
+            @routine
+            async def cleanup() -> None:
+                with anyio.CancelScope(shield=True):
+                    async with selectors(guard) as (selector,):
+                        assert selector is None
+                cleaned.append(True)
+
+            registered.set()
+            return cleanup
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(operation.a, 42)
+            await registered.wait()
+            group.cancel_scope.cancel()
+        assert cleaned == [True]
+
+    anyio.run(main, backend=backend)
+
+
+def test_selectable_direct_calls_raise_delivered_errors() -> None:
+    from .selectable import selectable
+
+    error = ValueError("delivered")
+    cleaned: list[bool] = []
+
+    @selectable
+    def operation(guard: SelectorGuard[int]) -> Callable[[], None]:
+        with selectors(guard) as (selector,):
+            assert selector is not None
+            selector.error(error)
+        return lambda: cleaned.append(True)
+
+    with pytest.raises(ValueError) as raised:
+        operation()
+    assert raised.value is error
+    assert cleaned == [True]
+
+
+def test_selectable_typing_rejects_invalid_calls(tmp_path: Any) -> None:
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    source = """from collections.abc import Callable
+from noio import routine
+from noio.select import select
+from noio.selectable import selectable
+from noio.selectable import SelectorGuard
+
+@selectable
+def ordinary(
+    guard: SelectorGuard[int], value: str, *, count: int = 1
+) -> Callable[[], None]:
+    return lambda: None
+
+@selectable
+@routine
+async def asynchronous(guard: SelectorGuard[int], value: str) -> Callable[[], None]:
+    return lambda: None
+
+class Example:
+    @selectable
+    def method(self, guard: SelectorGuard[int], value: str) -> Callable[[], None]:
+        return lambda: None
+
+@routine
+async def invalid_cleanup(guard: SelectorGuard[int]) -> int:
+    return 42
+
+selectable(invalid_cleanup)  # reject
+
+ordinary(1)  # reject
+ordinary.select("x", count="bad")  # reject
+ordinary.a("x")  # reject
+Example().method(1)  # reject
+Example.method.select(Example(), 1)  # reject
+
+async def caller() -> None:
+    await asynchronous.a(1)  # reject
+    await select.a(ordinary.select("x"))  # reject
+"""
+    (tmp_path / "example.py").write_text(source)
+    (tmp_path / "pyrightconfig.json").write_text(
+        json.dumps(
+            {
+                "include": ["example.py"],
+                "extraPaths": [str(Path(__file__).resolve().parent.parent)],
+                "pythonVersion": "3.15",
+                "typeCheckingMode": "standard",
+            }
+        )
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "basedpyright",
+            "--project",
+            str(tmp_path),
+            "--outputjson",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    diagnostics = json.loads(result.stdout)["generalDiagnostics"]
+    expected = {i for i, line in enumerate(source.splitlines()) if "# reject" in line}
+    assert {item["range"]["start"]["line"] for item in diagnostics} == expected, (
+        result.stdout
+    )
+    assert all(item["severity"] == "error" for item in diagnostics), result.stdout
+
+
+def test_decorated_registration_without_cleanup(async_runtime: AsyncRuntime) -> None:
+    from .selectable import selectable
+
+    @selectable
+    def ordinary(guard: SelectorGuard[int], value: int) -> None:
+        with selectors(guard) as (selector,):
+            if selector is not None:
+                selector.result(value)
+
+    @selectable
+    @routine
+    async def asynchronous(guard: SelectorGuard[int], value: int) -> None:
+        async with selectors(guard) as (selector,):
+            if selector is not None:
+                selector.result(value)
+
+    assert assert_type(ordinary(42), int) == 42
+    assert assert_type(asynchronous(42), int) == 42
+    assert select(ordinary.select(42)) == (0, 42)
+
+    async def main() -> None:
+        assert assert_type(await asynchronous.a(42), int) == 42
+        assert await select.a(asynchronous.select(42)) == (0, 42)
+
+    async_runtime.run(main)

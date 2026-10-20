@@ -630,3 +630,44 @@ def test_async_cleanup_uses_duck_typing(async_runtime: AsyncRuntime) -> None:
         assert log == ["cleanup"]
 
     async_runtime.run(main)
+
+
+def _check_registration_without_cleanup(checkpoint: Callable[[], None]) -> None:
+    guards: list[SelectorGuard[int]] = []
+
+    class Ready:
+        def __select__(self, guard: SelectorGuard[int]) -> None:
+            guards.append(guard)
+            with selectors(guard) as (selector,):
+                if selector is not None:
+                    selector.result(42)
+
+    assert assert_type(select(Ready(), Ready()), tuple[int, int]) == (0, 42)
+    for guard in guards:
+        with selectors(guard) as (selector,):
+            assert selector is None
+    checkpoint()
+
+
+def test_registration_without_cleanup(sync_runtime: RunSync) -> None:
+    sync_runtime(_check_registration_without_cleanup)
+
+
+def test_routine_registration_without_cleanup(async_runtime: AsyncRuntime) -> None:
+    guards: list[SelectorGuard[int]] = []
+
+    class Ready:
+        @routine
+        async def __select__(self, guard: SelectorGuard[int]) -> None:
+            guards.append(guard)
+            async with selectors(guard) as (selector,):
+                if selector is not None:
+                    selector.result(42)
+
+    async def main() -> None:
+        assert assert_type(await select.a(Ready(), Ready()), tuple[int, int]) == (0, 42)
+        for guard in guards:
+            async with selectors(guard) as (selector,):
+                assert selector is None
+
+    async_runtime.run(main)

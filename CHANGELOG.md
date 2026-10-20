@@ -8,7 +8,15 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 Unreleased
 ----------
 
+### Fixed
+
+- Reject invalid routine cleanup return types in `@selectable` annotations.
+
 ### Added
+
+- Selectable registration may omit cleanup when none is needed.
+
+- `@noio.selectable.selectable` to make a function or method usable directly or as a selectable.
 
 - `noio.select.select` to wait for one of several selectable operations.
 

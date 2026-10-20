@@ -6,16 +6,55 @@ Only one choice can win.
 The `noio.selectable` module lets implementations check whether their choices
 can still win and complete them with a value or an exception.
 
+Decorating a function or method
+-------------------------------
+
+Use `@selectable` to make a registration function callable as an operation:
+
 ```python
-from noio.selectable import SelectorGuard, selectors
+from noio.select import select
+from noio.selectable import SelectorGuard, selectable, selectors
+
+@selectable
+def ready(guard: SelectorGuard[str], value: str) -> None:
+    with selectors(guard) as (selector,):
+        if selector is not None:
+            selector.result(value)
+
+assert ready("hello") == "hello"
+assert select(ready.select("first"), ready.select("second")) == (0, "first")
 ```
+
+A direct call selects that one operation and returns its value.
+`.select(...)` captures the arguments without registering the operation.
+
+For a method that also supports coroutine calls, apply `@noio.routine` first:
+
+```python
+import noio
+
+class Greeter:
+    @selectable
+    @noio.routine
+    async def greet(self, guard: SelectorGuard[str], name: str) -> None:
+        async with selectors(guard) as (selector,):
+            if selector is not None:
+                selector.result(f"Hello, {name}!")
+
+greeter = Greeter()
+assert greeter.greet("world") == "Hello, world!"
+```
+
+This also supports `await greeter.greet.a("world")`
+and `await select.a(greeter.greet.select("world"), other)`.
 
 Registration and cleanup
 ------------------------
 
 `Selectable[T]` from `noio.select` describes an operation that can complete with a value of type `T`.
 Implement `__select__(self, guard)` to register the supplied `SelectorGuard[T]`
-and return a callable taking no arguments for cleanup.
+and return a callable taking no arguments for cleanup, if needed.
+Return `None`, or omit the return, when there is no cleanup to do.
 Registration may complete the choice immediately or retain its guard for later.
 
 Ordinary selection calls registration and cleanup directly.

@@ -3,30 +3,31 @@
 from collections.abc import Callable
 from contextlib import AsyncExitStack
 from contextlib import ExitStack
+from typing import Any
 from typing import Protocol
 from typing import cast
 
+from ._selection import SelectorGuard
 from ._selection import _Selection
 from .routine import Routine
 from .routine import cleared_mode
 from .routine import routine
-from .selectable import SelectorGuard
 
 __all__ = ["Selectable", "select"]
 
 
 class _Selectable[T](Protocol):
-    def __select__(self, guard: SelectorGuard[T], /) -> Callable[[], None]: ...
+    def __select__(self, guard: SelectorGuard[T], /) -> Callable[[], None] | None: ...
 
 
 class _RoutineSelectable[T](Protocol):
     @routine
-    async def __select__(self, guard: SelectorGuard[T], /) -> Callable[[], None]: ...
+    async def __select__(self, guard: SelectorGuard[T], /) -> Any: ...
 
 
 class _ClearedSelectable[T](Protocol):
     @cleared_mode
-    def __select__(self, guard: SelectorGuard[T], /) -> Callable[[], None]: ...
+    def __select__(self, guard: SelectorGuard[T], /) -> Any: ...
 
 
 # Keep the descriptors explicit: protocol matching does not bind them
@@ -57,7 +58,8 @@ async def select[T](*choices: _RoutineSelectable[T]) -> tuple[int, T]:  # pyrigh
         try:
             for index, register in enumerate(registrations):
                 cleanup = await register.a(SelectorGuard(selection, index))
-                cleanups.push_async_callback(_cleanup, cleanup)
+                if cleanup is not None:
+                    cleanups.push_async_callback(_cleanup, cleanup)
             return await selection.wait.a()
         finally:
             await selection.invalidate.a()
@@ -73,7 +75,8 @@ def select[T](*choices: Selectable[T]) -> tuple[int, T]:
         try:
             for index, register in enumerate(registrations):
                 cleanup = register(SelectorGuard(selection, index))
-                cleanups.callback(cleanup)
+                if cleanup is not None:
+                    cleanups.callback(cleanup)
             return selection.wait()
         finally:
             selection.invalidate()
