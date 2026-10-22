@@ -1,6 +1,7 @@
 from collections.abc import Awaitable
 from collections.abc import Callable
 from typing import Any
+from typing import Literal
 from typing import Self
 from typing import assert_type
 
@@ -318,7 +319,7 @@ def _check_selectable_functions_and_methods(checkpoint: Callable[[], None]) -> N
 
     prepared = operation.select(3, scale=4)
     assert not log
-    assert assert_type(select(prepared), tuple[int, int]) == (0, 12)
+    assert assert_type(select(prepared), tuple[Literal[0], int]) == (0, 12)
     assert assert_type(operation(3), int) == 6
     assert log == ["register", "cleanup"] * 2
     assert not hasattr(operation, "a")
@@ -343,7 +344,10 @@ def _check_selectable_functions_and_methods(checkpoint: Callable[[], None]) -> N
     assert assert_type(first.calculate(3), int) == 16
     assert assert_type(second.calculate(3, scale=4), int) == 32
     assert assert_type(Counter.calculate(first, 3), int) == 16
-    assert assert_type(select(second.calculate.select(3)), tuple[int, int]) == (0, 26)
+    assert assert_type(select(second.calculate.select(3)), tuple[Literal[0], int]) == (
+        0,
+        26,
+    )
     assert select(Counter.calculate.select(second, 3)) == (0, 26)
     checkpoint()
 
@@ -401,13 +405,13 @@ def test_selectable_routine_functions_and_methods(async_runtime: AsyncRuntime) -
         call = operation.a(3)
         assert not log
         assert assert_type(await call, int) == 6
-        assert assert_type(await select.a(prepared), tuple[int, int]) == (0, 12)
+        assert assert_type(await select.a(prepared), tuple[Literal[0], int]) == (0, 12)
         assert log == ["register", "cleanup"] * 2
         assert assert_type(await first.calculate.a(3), int) == 16
         assert assert_type(await second.calculate.a(3, scale=4), int) == 32
         assert assert_type(await Counter.calculate.a(first, 3), int) == 16
         assert assert_type(
-            await select.a(second.calculate.select(3)), tuple[int, int]
+            await select.a(second.calculate.select(3)), tuple[Literal[0], int]
         ) == (0, 26)
         assert await select.a(Counter.calculate.select(second, 3)) == (0, 26)
         with pytest.raises(RuntimeError, match="Use await"):

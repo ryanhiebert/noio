@@ -14,6 +14,8 @@ Unreleased
 
 ### Added
 
+- Correlated index and value types for `select` results.
+
 - Selectable registration may omit cleanup when none is needed.
 
 - `@noio.selectable.selectable` to make a function or method usable directly or as a selectable.

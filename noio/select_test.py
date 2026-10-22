@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any
+from typing import Literal
 from typing import assert_type
 
 import anyio
@@ -121,7 +122,7 @@ def test_async_registration_and_cleanup(async_runtime: AsyncRuntime) -> None:
         with pytest.raises(
             TypeError, match="requires selectables to be implemented with routines"
         ):
-            await select.a(
+            await select.a(  # pyright: ignore[reportCallIssue]
                 choices[0],
                 OrdinaryChoice("bad", log, "ordinary"),  # pyright: ignore[reportArgumentType]
             )
@@ -438,7 +439,7 @@ def test_routine_selectable_with_local_cleanup() -> None:
             return cleanup
 
     choice: Selectable[int] = Choice()
-    assert assert_type(select(choice), tuple[int, int]) == (0, 42)
+    assert assert_type(select(choice), tuple[Literal[0], int]) == (0, 42)
     assert log == ["cleanup"]
 
 
@@ -542,7 +543,9 @@ def _check_sync_cleanup_accepts_either_callable(checkpoint: Callable[[], None]) 
 
     for choice_type in (Ordinary, Dual):
         for callback in (cleanup, routine_cleanup):
-            assert assert_type(select(choice_type(callback)), tuple[int, int]) == (
+            assert assert_type(
+                select(choice_type(callback)), tuple[Literal[0], int]
+            ) == (
                 0,
                 42,
             )
@@ -572,7 +575,7 @@ def test_cleared_mode_registration_is_ordinary_only(
             log.append("cleanup")
 
     choice = Choice()
-    assert assert_type(select(choice), tuple[int, int]) == (0, 42)
+    assert assert_type(select(choice), tuple[Literal[0], int]) == (0, 42)
     assert log == ["register", "cleanup"]
     log.clear()
 
@@ -580,7 +583,7 @@ def test_cleared_mode_registration_is_ordinary_only(
         with pytest.raises(
             TypeError, match="requires selectables to be implemented with routines"
         ):
-            await select.a(choice)  # pyright: ignore[reportArgumentType]
+            await select.a(choice)  # pyright: ignore[reportArgumentType, reportCallIssue]
         assert not log
 
     async_runtime.run(main)
@@ -642,7 +645,9 @@ def _check_registration_without_cleanup(checkpoint: Callable[[], None]) -> None:
                 if selector is not None:
                     selector.result(42)
 
-    assert assert_type(select(Ready(), Ready()), tuple[int, int]) == (0, 42)
+    assert assert_type(
+        select(Ready(), Ready()), tuple[Literal[0], int] | tuple[Literal[1], int]
+    ) == (0, 42)
     for guard in guards:
         with selectors(guard) as (selector,):
             assert selector is None
@@ -665,9 +670,333 @@ def test_routine_registration_without_cleanup(async_runtime: AsyncRuntime) -> No
                     selector.result(42)
 
     async def main() -> None:
-        assert assert_type(await select.a(Ready(), Ready()), tuple[int, int]) == (0, 42)
+        assert assert_type(
+            await select.a(Ready(), Ready()),
+            tuple[Literal[0], int] | tuple[Literal[1], int],
+        ) == (0, 42)
         for guard in guards:
             async with selectors(guard) as (selector,):
                 assert selector is None
 
     async_runtime.run(main)
+
+
+class _TypedChoice[T]:
+    def __init__(self, value: T, ready: bool = True) -> None:
+        self.value = value
+        self.ready = ready
+
+    @routine
+    async def __select__(self, guard: SelectorGuard[T]) -> None:
+        if self.ready:
+            async with selectors(guard) as (selector,):
+                if selector is not None:
+                    selector.result(self.value)
+
+
+class _OrdinaryTypedChoice[T]:
+    def __init__(self, value: T) -> None:
+        self.value = value
+
+    def __select__(self, guard: SelectorGuard[T]) -> None:
+        with selectors(guard) as (selector,):
+            if selector is not None:
+                selector.result(self.value)
+
+
+def test_select_correlates_index_and_value() -> None:
+    number = _OrdinaryTypedChoice[int](42)
+    text = _OrdinaryTypedChoice[str]("hello")
+    data = _OrdinaryTypedChoice[bytes](b"data")
+    assert_type(select(number), tuple[Literal[0], int])
+    assert_type(select(number, text), tuple[Literal[0], int] | tuple[Literal[1], str])
+    assert_type(
+        select(number, text, data),
+        tuple[Literal[0], int] | tuple[Literal[1], str] | tuple[Literal[2], bytes],
+    )
+    # Both protocol forms can participate in the same ordinary call.
+    assert_type(
+        select(number, _TypedChoice[str]("hello")),
+        tuple[Literal[0], int] | tuple[Literal[1], str],
+    )
+    assert isinstance(select, Routine)
+
+
+@pytest.mark.parametrize("winner", [0, 1, 2])
+def test_select_result_narrows_by_index(
+    async_runtime: AsyncRuntime, winner: int
+) -> None:
+    number = _TypedChoice[int](42, winner == 0)
+    text = _TypedChoice[str]("hello", winner == 1)
+    data = _TypedChoice[bytes](b"data", winner == 2)
+
+    @routine
+    async def choose() -> None:
+        result = await select.a(number, text, data)
+        assert_type(
+            result,
+            tuple[Literal[0], int] | tuple[Literal[1], str] | tuple[Literal[2], bytes],
+        )
+        assert result[0] == winner
+        if result[0] == 0:
+            assert assert_type(result[1], int) == 42
+        elif result[0] == 1:
+            assert assert_type(result[1], str) == "hello"
+        else:
+            assert assert_type(result[1], bytes) == b"data"
+
+    choose()
+    async_runtime.run(choose.a)
+
+
+def test_select_typing_fallbacks(async_runtime: AsyncRuntime) -> None:
+    numbers = [_TypedChoice[int](value) for value in range(11)]
+    mixed = (
+        _TypedChoice[int](1),
+        _TypedChoice[str]("a"),
+        _TypedChoice[bytes](b"b"),
+        _TypedChoice[float](2.5),
+        _TypedChoice[int](1),
+        _TypedChoice[int](1),
+        _TypedChoice[int](1),
+        _TypedChoice[int](1),
+        _TypedChoice[int](1),
+        _TypedChoice[int](1),
+        _TypedChoice[int](1),
+    )
+    assert_type(select(*numbers), tuple[int, int])
+    assert_type(select(*mixed), tuple[int, Any])
+
+    async def main() -> None:
+        assert_type(await select.a(numbers[0]), tuple[Literal[0], int])
+        assert_type(
+            await select.a(mixed[0], mixed[1]),
+            tuple[Literal[0], int] | tuple[Literal[1], str],
+        )
+        assert_type(await select.a(*numbers), tuple[int, int])
+        assert_type(await select.a(*mixed), tuple[int, Any])
+
+    async_runtime.run(main)
+
+
+def test_select_extended_result_types(async_runtime: AsyncRuntime) -> None:
+    choice0 = _TypedChoice[int](0)
+    choice1 = _TypedChoice[str]("one", ready=False)
+    choice2 = _TypedChoice[bytes](b"two", ready=False)
+    choice3 = _TypedChoice[float](3.0, ready=False)
+    choice4 = _TypedChoice[bool](True, ready=False)
+    choice5 = _TypedChoice[complex](5j, ready=False)
+    choice6 = _TypedChoice[list[int]]([6], ready=False)
+    choice7 = _TypedChoice[dict[str, int]]({"seven": 7}, ready=False)
+    choice8 = _TypedChoice[tuple[int, ...]]((8,), ready=False)
+    choice9 = _TypedChoice[set[int]]({9}, ready=True)
+
+    async def main() -> None:
+        assert_type(
+            await select.a(choice0, choice1, choice2, choice3),
+            tuple[Literal[0], int]
+            | tuple[Literal[1], str]
+            | tuple[Literal[2], bytes]
+            | tuple[Literal[3], float],
+        )
+        assert_type(
+            await select.a(choice0, choice1, choice2, choice3, choice4),
+            tuple[Literal[0], int]
+            | tuple[Literal[1], str]
+            | tuple[Literal[2], bytes]
+            | tuple[Literal[3], float]
+            | tuple[Literal[4], bool],
+        )
+        assert_type(
+            await select.a(choice0, choice1, choice2, choice3, choice4, choice5),
+            tuple[Literal[0], int]
+            | tuple[Literal[1], str]
+            | tuple[Literal[2], bytes]
+            | tuple[Literal[3], float]
+            | tuple[Literal[4], bool]
+            | tuple[Literal[5], complex],
+        )
+        assert_type(
+            await select.a(
+                choice0, choice1, choice2, choice3, choice4, choice5, choice6
+            ),
+            tuple[Literal[0], int]
+            | tuple[Literal[1], str]
+            | tuple[Literal[2], bytes]
+            | tuple[Literal[3], float]
+            | tuple[Literal[4], bool]
+            | tuple[Literal[5], complex]
+            | tuple[Literal[6], list[int]],
+        )
+        assert_type(
+            await select.a(
+                choice0, choice1, choice2, choice3, choice4, choice5, choice6, choice7
+            ),
+            tuple[Literal[0], int]
+            | tuple[Literal[1], str]
+            | tuple[Literal[2], bytes]
+            | tuple[Literal[3], float]
+            | tuple[Literal[4], bool]
+            | tuple[Literal[5], complex]
+            | tuple[Literal[6], list[int]]
+            | tuple[Literal[7], dict[str, int]],
+        )
+        assert_type(
+            await select.a(
+                choice0,
+                choice1,
+                choice2,
+                choice3,
+                choice4,
+                choice5,
+                choice6,
+                choice7,
+                choice8,
+            ),
+            tuple[Literal[0], int]
+            | tuple[Literal[1], str]
+            | tuple[Literal[2], bytes]
+            | tuple[Literal[3], float]
+            | tuple[Literal[4], bool]
+            | tuple[Literal[5], complex]
+            | tuple[Literal[6], list[int]]
+            | tuple[Literal[7], dict[str, int]]
+            | tuple[Literal[8], tuple[int, ...]],
+        )
+        assert_type(
+            await select.a(
+                choice0,
+                choice1,
+                choice2,
+                choice3,
+                choice4,
+                choice5,
+                choice6,
+                choice7,
+                choice8,
+                choice9,
+            ),
+            tuple[Literal[0], int]
+            | tuple[Literal[1], str]
+            | tuple[Literal[2], bytes]
+            | tuple[Literal[3], float]
+            | tuple[Literal[4], bool]
+            | tuple[Literal[5], complex]
+            | tuple[Literal[6], list[int]]
+            | tuple[Literal[7], dict[str, int]]
+            | tuple[Literal[8], tuple[int, ...]]
+            | tuple[Literal[9], set[int]],
+        )
+
+    async_runtime.run(main)
+    assert_type(
+        select(choice0, choice1, choice2, choice3),
+        tuple[Literal[0], int]
+        | tuple[Literal[1], str]
+        | tuple[Literal[2], bytes]
+        | tuple[Literal[3], float],
+    )
+    assert_type(
+        select(choice0, choice1, choice2, choice3, choice4),
+        tuple[Literal[0], int]
+        | tuple[Literal[1], str]
+        | tuple[Literal[2], bytes]
+        | tuple[Literal[3], float]
+        | tuple[Literal[4], bool],
+    )
+    assert_type(
+        select(choice0, choice1, choice2, choice3, choice4, choice5),
+        tuple[Literal[0], int]
+        | tuple[Literal[1], str]
+        | tuple[Literal[2], bytes]
+        | tuple[Literal[3], float]
+        | tuple[Literal[4], bool]
+        | tuple[Literal[5], complex],
+    )
+    assert_type(
+        select(choice0, choice1, choice2, choice3, choice4, choice5, choice6),
+        tuple[Literal[0], int]
+        | tuple[Literal[1], str]
+        | tuple[Literal[2], bytes]
+        | tuple[Literal[3], float]
+        | tuple[Literal[4], bool]
+        | tuple[Literal[5], complex]
+        | tuple[Literal[6], list[int]],
+    )
+    assert_type(
+        select(choice0, choice1, choice2, choice3, choice4, choice5, choice6, choice7),
+        tuple[Literal[0], int]
+        | tuple[Literal[1], str]
+        | tuple[Literal[2], bytes]
+        | tuple[Literal[3], float]
+        | tuple[Literal[4], bool]
+        | tuple[Literal[5], complex]
+        | tuple[Literal[6], list[int]]
+        | tuple[Literal[7], dict[str, int]],
+    )
+    assert_type(
+        select(
+            choice0,
+            choice1,
+            choice2,
+            choice3,
+            choice4,
+            choice5,
+            choice6,
+            choice7,
+            choice8,
+        ),
+        tuple[Literal[0], int]
+        | tuple[Literal[1], str]
+        | tuple[Literal[2], bytes]
+        | tuple[Literal[3], float]
+        | tuple[Literal[4], bool]
+        | tuple[Literal[5], complex]
+        | tuple[Literal[6], list[int]]
+        | tuple[Literal[7], dict[str, int]]
+        | tuple[Literal[8], tuple[int, ...]],
+    )
+    assert_type(
+        select(
+            choice0,
+            choice1,
+            choice2,
+            choice3,
+            choice4,
+            choice5,
+            choice6,
+            choice7,
+            choice8,
+            choice9,
+        ),
+        tuple[Literal[0], int]
+        | tuple[Literal[1], str]
+        | tuple[Literal[2], bytes]
+        | tuple[Literal[3], float]
+        | tuple[Literal[4], bool]
+        | tuple[Literal[5], complex]
+        | tuple[Literal[6], list[int]]
+        | tuple[Literal[7], dict[str, int]]
+        | tuple[Literal[8], tuple[int, ...]]
+        | tuple[Literal[9], set[int]],
+    )
+
+    choice0.ready = False
+
+    async def last() -> None:
+        result = await select.a(
+            choice0,
+            choice1,
+            choice2,
+            choice3,
+            choice4,
+            choice5,
+            choice6,
+            choice7,
+            choice8,
+            choice9,
+        )
+        assert result[0] == 9
+        assert assert_type(result[1], set[int]) == {9}
+
+    async_runtime.run(last)
