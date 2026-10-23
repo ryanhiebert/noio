@@ -51,6 +51,8 @@ Unreleased
 - `noio.ContextManager` as an abstract base class
   for context managers with routine entry and exit methods.
 
+- `noio.sleep` to pause execution using the current IO runtime.
+
 [0.1] - 2026-10-17
 -----------------
 

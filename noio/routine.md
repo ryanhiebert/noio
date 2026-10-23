@@ -54,29 +54,19 @@ Use `noio.cleared_mode` to clear the surrounding mode before calling the functio
 
 ```python
 import asyncio
-import time
 import noio
 
 @noio.routine
-async def sleep(seconds: float) -> None:
-    # Use asyncio.sleep here until noio.sleep is added.
-    await asyncio.sleep(seconds)
-
-@sleep.fn
-def sleep(seconds: float) -> None:
-    time.sleep(seconds)
-
-@noio.routine
 async def run_delay(seconds: float) -> None:
-    noio.cleared_mode(asyncio.run)(sleep.a(seconds))
+    noio.cleared_mode(asyncio.run)(noio.sleep.a(seconds))
 
 run_delay(0.01)
 ```
 
 The ordinary call to `run_delay` drives its coroutine implementation.
 Clearing the mode before calling `asyncio.run` lets the event loop
-use `sleep`'s coroutine implementation, which yields to the loop.
-Without clearing it, `sleep.a()` would use the ordinary implementation
+use `noio.sleep`'s coroutine implementation, which yields to the loop.
+Without clearing it, `noio.sleep.a()` would use the ordinary implementation
 and block the event loop with `time.sleep`.
 
 You can also decorate a function that starts the event loop:
@@ -84,7 +74,7 @@ You can also decorate a function that starts the event loop:
 ```python
 @noio.cleared_mode
 def run_sleep(seconds: float) -> None:
-    asyncio.run(sleep.a(seconds))
+    asyncio.run(noio.sleep.a(seconds))
 
 @noio.routine
 async def run_delay(seconds: float) -> None:
