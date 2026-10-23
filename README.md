@@ -1,30 +1,57 @@
 noio
 ====
 
-There are many opinions on the right way to do IO.
-There are so many libraries.
-Some use regular functions, while some use coroutines.
-Some use threads.
-Some use green threads.
-Some existing abstractions only work with coroutines on single threads.
-You just want people to be able to use your library.
+`noio` brings together two big ideas:
+that many IO operations can support callers waiting on multiple things at once without compromise,
+and that IO can be abstracted across ordinary functions and coroutines.
 
-`noio` is a minimal IO interface
-that provides primitives that work no matter what IO the user chooses,
-with clear documentation of any compatibility limitations.
+Use `select` to wait for the first of several selectable operations to complete.
+Use `routine` to support ordinary and coroutine calls with one interface.
 
-Getting Started
----------------
+Wait for the first operation to complete
+---------------------------------------
 
-`noio` believes that coroutines are an advanced feature
+<!-- Replace this hypothetical example with a real noio example when one is available. -->
+
+Suppose a library provides connections with a selectable `receive` method.
+Ordinary calls wait for data from each connection in turn:
+
+```python
+primary_data = primary.receive(4096)
+secondary_data = secondary.receive(4096)
+```
+
+The first call waits for `primary`, even if `secondary` already has data available.
+Use `select` to receive from whichever connection can deliver first:
+
+```python
+from noio.select import select
+
+index, data = select(
+    primary.receive.select(4096),
+    secondary.receive.select(4096),
+)
+```
+
+Each operation requests up to 4096 bytes.
+If `primary` wins, `index` is `0` and `data` contains its received bytes.
+If `secondary` wins, `index` is `1` and `data` contains its received bytes.
+See [selection](noio/select.md) for usage.
+
+Support ordinary and coroutine calls
+------------------------------------
+
+Coroutines are an advanced feature
 that should be avoided wherever reasonable.
-That includes getting started writing a library with `noio`.
 When writing a new library, start with regular functions,
 which are able to support threads and green threads.
 It might look something like this:
 
 ```python
+import noio
+
 def greeting(name: str) -> str:
+    noio.sleep(0.1)
     return f"Hello, {name}!"
 
 assert greeting("world") == "Hello, world!"
@@ -32,7 +59,7 @@ assert greeting("world") == "Hello, world!"
 
 When it's important for your function to also support coroutine libraries
 like `asyncio`, `trio` and `anyio`,
-just update it to look like something like this:
+update it to look like something like this:
 
 ```python
 import asyncio
@@ -40,6 +67,7 @@ import noio
 
 @noio.routine
 async def greeting(name: str) -> str:
+    await noio.sleep.a(0.1)
     return f"Hello, {name}!"
 
 @noio.routine
@@ -61,20 +89,7 @@ Finding all the places to convert can be tricky,
 so `noio` will raise an error
 if a routine implementation calls another routine with a regular function call.
 
-Context managers
-----------------
-
-Use `@noio.contextmanager` on an async generator
-to support both `with` and `async with`.
-For class implementations,
-inherit from `noio.ContextManager`.
-See [context managers](noio/contextlib.md) for usage.
-
-Selection
----------
-
-Use `select` from `noio.select` to wait for one of several selectable operations.
-See [selection](noio/select.md) for usage.
+See [routines](noio/routine.md) for usage and customization.
 
 Contributing
 ------------
