@@ -28,7 +28,9 @@ assert select(ready.select("first"), ready.select("second")) == (0, "first")
 A direct call selects that one operation and returns its value.
 `.select(...)` captures the arguments without registering the operation.
 
-For a method that also supports coroutine calls, apply `@noio.routine` first:
+For a method that also supports coroutine calls, wrap a [routine](routine.md).
+As with bare routines, you may use `.fn`
+to customize the ordinary implementation separately from the coroutine implementation:
 
 ```python
 import noio
@@ -41,12 +43,20 @@ class Greeter:
             if selector is not None:
                 selector.result(f"Hello, {name}!")
 
+    @greet.fn
+    def greet(self, guard: SelectorGuard[str], name: str) -> None:
+        with selectors(guard) as (selector,):
+            if selector is not None:
+                selector.result(f"Hello, {name}!")
+
 greeter = Greeter()
 assert greeter.greet("world") == "Hello, world!"
 ```
 
 This also supports `await greeter.greet.a("world")`
 and `await select.a(greeter.greet.select("world"), other)`.
+Both registration implementations receive the guard
+and return a cleanup callback or `None`.
 
 Registration and cleanup
 ------------------------
@@ -194,3 +204,35 @@ For one, two, or three guards,
 the tuple annotations preserve each guard's individual value type.
 Larger groups have a fallback annotation of `tuple[Selector[Any] | None, ...]`.
 Calling `selectors()` without arguments yields an empty tuple.
+
+Customizing direct execution
+----------------------------
+
+Use `.call` to supply a direct implementation that avoids selection.
+It receives the operation's arguments without a guard
+and returns the operation's result:
+
+```python
+@ready.call
+def ready(value: str) -> str:
+    return value
+```
+
+`.select(...)` continues to use the registration implementation.
+The direct implementation may also be a routine:
+
+```python
+@ready.call
+@noio.routine
+async def ready(value: str) -> str:
+    return value
+```
+
+When the direct implementation is a [routine](routine.md),
+use `.call_fn` to supply its ordinary implementation:
+
+```python
+@ready.call_fn
+def ready(value: str) -> str:
+    return value
+```

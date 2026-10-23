@@ -14,6 +14,8 @@ Unreleased
 
 ### Added
 
+- Custom registration and direct-call implementations for `@selectable`.
+
 - Correlated index and value types for `select` results.
 
 - Selectable registration may omit cleanup when none is needed.

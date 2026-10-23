@@ -9,11 +9,14 @@ does not roll back if the selectable implementation subsequently raises.
 
 from collections.abc import AsyncIterator
 from collections.abc import Callable
+from copy import copy
 from functools import update_wrapper
 from inspect import iscoroutinefunction
+from types import MethodType
 from typing import Any
 from typing import Concatenate
 from typing import Protocol
+from typing import Self
 from typing import cast
 from typing import overload
 
@@ -182,13 +185,103 @@ class _UnboundRoutineCall[**P, T](Protocol):
     def select(self, *args: P.args, **kwargs: P.kwargs) -> _RoutineOperation[T]: ...
 
 
-class _SelectableCall[**P]:
+class _CallOverrides:
+    _register: Any
+    _unbound: bool
+    _call: Callable[..., Any] | None = None
+    _operation: type[_Operation[Any]] | type[_RoutineOperation[Any]] = _Operation
+
+    def _runner(self) -> Routine[..., Any]:
+        if isinstance(self._call, Routine):
+            runner = self._call
+        else:
+
+            @routine
+            async def runner(*args: Any, **kwargs: Any) -> Any:
+                operation = self._operation(self._register, args, kwargs, self._unbound)
+                return (await select.a(cast(Any, operation)))[1]
+
+            if self._call is not None:
+                runner = runner.fn(self._call)
+        return runner
+
+    def _with_call(self, fn: Callable[..., Any]) -> Any:
+        if iscoroutinefunction(fn):
+            raise TypeError(
+                "Wrap coroutine implementations with @routine before applying .call."
+            )
+        if isinstance(self._register, Routine):
+            wrapper = (
+                _RoutineDirectSelectableCall
+                if isinstance(fn, Routine)
+                else _RoutineSelectableCall
+            )
+        else:
+            wrapper = (
+                _DirectRoutineSelectableCall
+                if isinstance(fn, Routine)
+                else _SelectableCall
+            )
+        result = wrapper(self._register, unbound=self._unbound)
+        result._call = fn
+        return result
+
+    def _with_call_fn(self, fn: Callable[..., Any]) -> Self:
+        assert isinstance(self._call, Routine)
+        result = copy(self)
+        result._call = self._call.fn(fn)
+        return result
+
+    def _bind(self, instance: Any, owner: type[Any] | None) -> Self:
+        result = copy(self)
+        if instance is None:
+            result._unbound = True
+        else:
+            result._register = self._register.__get__(instance, owner)
+            if self._call is not None:
+                result._call = (
+                    self._call.__get__(instance, owner)
+                    if isinstance(self._call, Routine)
+                    else MethodType(self._call, instance)
+                )
+        return result
+
+
+class _SelectableCall[**P](_CallOverrides):
     def __init__(
         self, register: Callable[P, Callable[[], None] | None], *, unbound: bool = False
     ) -> None:
         self._register = register
         self._unbound = unbound
         update_wrapper(cast(Callable[..., Any], self), register)
+
+    @overload
+    def call[**A, T](
+        self: _SelectableCall[Concatenate[SelectorGuard[T], A]], fn: Routine[A, T], /
+    ) -> _DirectRoutineSelectableCall[P]: ...
+
+    @overload
+    def call[O, **A, T](
+        self: _SelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        fn: Routine[Concatenate[O, A], T],
+        /,
+    ) -> _DirectRoutineSelectableCall[P]: ...
+
+    @overload
+    def call[**A, T](
+        self: _SelectableCall[Concatenate[SelectorGuard[T], A]], fn: Callable[A, T], /
+    ) -> _SelectableCall[P]: ...
+
+    @overload
+    def call[O, **A, T](
+        self: _SelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        fn: Callable[Concatenate[O, A], T],
+        /,
+    ) -> _SelectableCall[P]: ...
+
+    def call(self, fn: Callable[..., Any], /) -> Any:
+        """Return a copy with a direct callable or routine implementation."""
+        return self._with_call(fn)
 
     def select[**A, T](
         self: _SelectableCall[Concatenate[SelectorGuard[T], A]],
@@ -202,7 +295,7 @@ class _SelectableCall[**P]:
         *args: A.args,
         **kwargs: A.kwargs,
     ) -> T:
-        return select(self.select(*args, **kwargs))[1]
+        return self._runner()(*args, **kwargs)
 
     @overload
     def __get__[O, **A, T](
@@ -219,16 +312,102 @@ class _SelectableCall[**P]:
     ) -> _SelectableCall[Concatenate[SelectorGuard[T], A]]: ...
 
     def __get__(self, instance: Any, owner: type[Any] | None = None) -> Any:
-        if instance is None:
-            return type(self)(self._register, unbound=True)
-        return type(self)(self._register.__get__(instance, owner))
+        return self._bind(instance, owner)
 
 
-class _RoutineSelectableCall[**P]:
+class _UnboundDirectRoutineCall[**P, T](_UnboundCall[P, T], Protocol):
+    async def a(self, *args: P.args, **kwargs: P.kwargs) -> T: ...
+
+
+class _DirectRoutineSelectableCall[**P](_SelectableCall[P]):
+    @overload
+    def call_fn[**A, T](
+        self: _DirectRoutineSelectableCall[Concatenate[SelectorGuard[T], A]],
+        fn: Callable[A, T],
+        /,
+    ) -> _DirectRoutineSelectableCall[P]: ...
+
+    @overload
+    def call_fn[O, **A, T](
+        self: _DirectRoutineSelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        fn: Callable[Concatenate[O, A], T],
+        /,
+    ) -> _DirectRoutineSelectableCall[P]: ...
+
+    def call_fn(self, fn: Callable[..., Any], /) -> Any:
+        """Return a copy with an ordinary direct-call implementation."""
+        return self._with_call_fn(fn)
+
+    async def a[**A, T](
+        self: _DirectRoutineSelectableCall[Concatenate[SelectorGuard[T], A]],
+        *args: A.args,
+        **kwargs: A.kwargs,
+    ) -> T:
+        return await self._runner().a(*args, **kwargs)
+
+    @overload
+    def __get__[O, **A, T](
+        self: _DirectRoutineSelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        instance: None,
+        owner: type[O],
+    ) -> _UnboundDirectRoutineCall[Concatenate[O, A], T]: ...
+
+    @overload
+    def __get__[O, **A, T](
+        self: _DirectRoutineSelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        instance: O,
+        owner: type[O] | None = None,
+    ) -> _DirectRoutineSelectableCall[Concatenate[SelectorGuard[T], A]]: ...
+
+    def __get__(self, instance: Any, owner: type[Any] | None = None) -> Any:
+        return self._bind(instance, owner)
+
+
+class _RoutineSelectableCall[**P](_CallOverrides):
+    _operation = _RoutineOperation
+
     def __init__(self, register: Routine[P, Any], *, unbound: bool = False) -> None:
         self._register = register
         self._unbound = unbound
         update_wrapper(cast(Callable[..., Any], self), register)
+
+    @overload
+    def call[**A, T](
+        self: _RoutineSelectableCall[Concatenate[SelectorGuard[T], A]],
+        fn: Routine[A, T],
+        /,
+    ) -> _RoutineDirectSelectableCall[P]: ...
+
+    @overload
+    def call[O, **A, T](
+        self: _RoutineSelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        fn: Routine[Concatenate[O, A], T],
+        /,
+    ) -> _RoutineDirectSelectableCall[P]: ...
+
+    @overload
+    def call[**A, T](
+        self: _RoutineSelectableCall[Concatenate[SelectorGuard[T], A]],
+        fn: Callable[A, T],
+        /,
+    ) -> _RoutineSelectableCall[P]: ...
+
+    @overload
+    def call[O, **A, T](
+        self: _RoutineSelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        fn: Callable[Concatenate[O, A], T],
+        /,
+    ) -> _RoutineSelectableCall[P]: ...
+
+    def call(self, fn: Callable[..., Any], /) -> Any:
+        """Return a copy with a direct callable or routine implementation."""
+        return self._with_call(fn)
+
+    def fn(self, fn: Callable[P, Callable[[], None] | None], /) -> Self:
+        """Return a copy with an ordinary registration implementation."""
+        result = copy(self)
+        result._register = self._register.fn(fn)
+        return result
 
     def select[**A, T](
         self: _RoutineSelectableCall[Concatenate[SelectorGuard[T], A]],
@@ -242,14 +421,14 @@ class _RoutineSelectableCall[**P]:
         *args: A.args,
         **kwargs: A.kwargs,
     ) -> T:
-        return select(self.select(*args, **kwargs))[1]
+        return self._runner()(*args, **kwargs)
 
     async def a[**A, T](
         self: _RoutineSelectableCall[Concatenate[SelectorGuard[T], A]],
         *args: A.args,
         **kwargs: A.kwargs,
     ) -> T:
-        return (await select.a(self.select(*args, **kwargs)))[1]
+        return await self._runner().a(*args, **kwargs)
 
     @overload
     def __get__[O, **A, T](
@@ -266,9 +445,44 @@ class _RoutineSelectableCall[**P]:
     ) -> _RoutineSelectableCall[Concatenate[SelectorGuard[T], A]]: ...
 
     def __get__(self, instance: Any, owner: type[Any] | None = None) -> Any:
-        if instance is None:
-            return type(self)(self._register, unbound=True)
-        return type(self)(self._register.__get__(instance, owner))
+        return self._bind(instance, owner)
+
+
+class _RoutineDirectSelectableCall[**P](_RoutineSelectableCall[P]):
+    @overload
+    def call_fn[**A, T](
+        self: _RoutineDirectSelectableCall[Concatenate[SelectorGuard[T], A]],
+        fn: Callable[A, T],
+        /,
+    ) -> _RoutineDirectSelectableCall[P]: ...
+
+    @overload
+    def call_fn[O, **A, T](
+        self: _RoutineDirectSelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        fn: Callable[Concatenate[O, A], T],
+        /,
+    ) -> _RoutineDirectSelectableCall[P]: ...
+
+    def call_fn(self, fn: Callable[..., Any], /) -> Any:
+        """Return a copy with an ordinary direct-call implementation."""
+        return self._with_call_fn(fn)
+
+    @overload
+    def __get__[O, **A, T](
+        self: _RoutineDirectSelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        instance: None,
+        owner: type[O],
+    ) -> _UnboundRoutineCall[Concatenate[O, A], T]: ...
+
+    @overload
+    def __get__[O, **A, T](
+        self: _RoutineDirectSelectableCall[Concatenate[O, SelectorGuard[T], A]],
+        instance: O,
+        owner: type[O] | None = None,
+    ) -> _RoutineDirectSelectableCall[Concatenate[SelectorGuard[T], A]]: ...
+
+    def __get__(self, instance: Any, owner: type[Any] | None = None) -> Any:
+        return self._bind(instance, owner)
 
 
 @overload

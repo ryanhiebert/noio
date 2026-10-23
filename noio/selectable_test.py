@@ -577,6 +577,38 @@ ordinary.a("x")  # reject
 Example().method(1)  # reject
 Example.method.select(Example(), 1)  # reject
 
+def wrong_argument(value: int) -> int:
+    return value
+
+def wrong_result(value: str) -> str:
+    return value
+
+def wrong_registration(guard: SelectorGuard[int], value: int) -> None:
+    pass
+
+def wrong_cleanup(guard: SelectorGuard[int], value: str) -> int:
+    return 42
+
+asynchronous.fn(wrong_registration)  # reject
+asynchronous.fn(wrong_cleanup)  # reject
+asynchronous.call(wrong_argument)  # reject
+asynchronous.call(wrong_result)  # reject
+asynchronous.call_fn(wrong_argument)  # reject
+asynchronous.call_fn(wrong_result)  # reject
+ordinary.call(wrong_argument)  # reject
+ordinary.call_fn(wrong_result)  # reject
+ordinary.fn(wrong_registration)  # reject
+
+@routine
+async def direct(value: str) -> int:
+    return len(value)
+
+configured = asynchronous.call(direct)
+configured.call_fn(wrong_argument)  # reject
+configured.call_fn(wrong_result)  # reject
+configured.call(lambda value: len(value)).call_fn(len)  # reject
+ordinary.call(len).call_fn(len)  # reject
+
 async def caller() -> None:
     await asynchronous.a(1)  # reject
     await select.a(ordinary.select("x"))  # reject
@@ -639,3 +671,273 @@ def test_decorated_registration_without_cleanup(async_runtime: AsyncRuntime) -> 
         assert await select.a(asynchronous.select(42)) == (0, 42)
 
     async_runtime.run(main)
+
+
+@pytest.mark.parametrize("registration_first", [False, True])
+def test_selectable_implementation_overrides(
+    async_runtime: AsyncRuntime, registration_first: bool
+) -> None:
+    from .selectable import selectable
+
+    log: list[str] = []
+
+    @selectable
+    @routine
+    async def operation(  # pyright: ignore[reportRedeclaration]
+        guard: SelectorGuard[int], value: int, *, offset: int = 0
+    ) -> None:
+        log.append("async registration")
+        async with selectors(guard) as (selector,):
+            assert selector is not None
+            selector.result(value + offset)
+
+    original = operation
+
+    def register(guard: SelectorGuard[int], value: int, *, offset: int = 0) -> None:
+        log.append("ordinary registration")
+        with selectors(guard) as (selector,):
+            assert selector is not None
+            selector.result(value + offset)
+
+    @routine
+    async def direct(value: int, *, offset: int = 0) -> int:
+        log.append("async direct")
+        return value + offset
+
+    if registration_first:
+        configured = operation.fn(register).call(direct)
+    else:
+        configured = operation.call(direct).fn(register)
+
+    @configured.call_fn
+    def operation(value: int, *, offset: int = 0) -> int:
+        log.append("ordinary direct")
+        return value + offset
+
+    assert assert_type(operation(40, offset=2), int) == 42
+    assert select(operation.select(40, offset=2)) == (0, 42)
+    assert log == ["ordinary direct", "ordinary registration"]
+    log.clear()
+
+    @routine
+    async def main() -> None:
+        assert assert_type(await operation.a(40, offset=2), int) == 42
+        assert await select.a(operation.select(40, offset=2)) == (0, 42)
+
+    main()
+    assert log == ["ordinary direct", "ordinary registration"]
+    log.clear()
+    async_runtime.run(main.a)
+    assert log == ["async direct", "async registration"]
+    log.clear()
+    assert original(42) == 42
+    assert log == ["async registration"]
+
+
+def test_selectable_method_overrides(async_runtime: AsyncRuntime) -> None:
+    from .selectable import selectable
+
+    class Example:
+        def __init__(self, prefix: str) -> None:
+            self.prefix = prefix
+
+        @selectable
+        @routine
+        async def operation(self, guard: SelectorGuard[str], value: int) -> None:  # pyright: ignore[reportRedeclaration]
+            async with selectors(guard) as (selector,):
+                assert selector is not None
+                selector.result(f"{self.prefix} async registration {value}")
+
+        @operation.fn
+        def operation(self, guard: SelectorGuard[str], value: int) -> None:  # pyright: ignore[reportRedeclaration]
+            with selectors(guard) as (selector,):
+                assert selector is not None
+                selector.result(f"{self.prefix} ordinary registration {value}")
+
+        @operation.call
+        @routine
+        async def operation(self, value: int) -> str:  # pyright: ignore[reportRedeclaration]
+            return f"{self.prefix} async direct {value}"
+
+        @operation.call_fn
+        def operation(self, value: int) -> str:
+            return f"{self.prefix} ordinary direct {value}"
+
+    class Child(Example):
+        pass
+
+    for example in (Example("first"), Child("second")):
+        assert (
+            assert_type(example.operation(42), str)
+            == f"{example.prefix} ordinary direct 42"
+        )
+        assert Example.operation(example, 42) == f"{example.prefix} ordinary direct 42"
+        assert (
+            select(example.operation.select(42))[1]
+            == f"{example.prefix} ordinary registration 42"
+        )
+        assert (
+            select(Example.operation.select(example, 42))[1]
+            == f"{example.prefix} ordinary registration 42"
+        )
+
+        async def main(example: Example = example) -> None:
+            assert (
+                assert_type(await example.operation.a(42), str)
+                == f"{example.prefix} async direct 42"
+            )
+            assert (
+                await Example.operation.a(example, 42)
+                == f"{example.prefix} async direct 42"
+            )
+            assert (await select.a(example.operation.select(42)))[
+                1
+            ] == f"{example.prefix} async registration 42"
+            assert (await select.a(Example.operation.select(example, 42)))[
+                1
+            ] == f"{example.prefix} async registration 42"
+
+        async_runtime.run(main)
+
+
+def test_ordinary_selectable_direct_overrides(async_runtime: AsyncRuntime) -> None:
+    from .selectable import selectable
+
+    @selectable
+    def operation(guard: SelectorGuard[int], value: int) -> None:
+        raise AssertionError("direct calls must not register")
+
+    def ordinary(value: int) -> int:
+        return value + 1
+
+    plain = operation.call(ordinary)
+    assert assert_type(plain(41), int) == 42
+    assert not hasattr(plain, "a")
+
+    @routine
+    async def direct(value: int) -> int:
+        await async_runtime.checkpoint()
+        return value + 2
+
+    first = operation.call(direct).call_fn(ordinary)
+    assert assert_type(first(41), int) == 42
+
+    async def main() -> None:
+        assert assert_type(await first.a(40), int) == 42
+        # A direct coroutine implementation does not make registration async.
+        with pytest.raises(TypeError, match="implemented with routines"):
+            await select.a(first.select(42))  # pyright: ignore[reportCallIssue, reportArgumentType]
+
+    async_runtime.run(main)
+
+
+def test_ordinary_selectable_direct_routine_method(async_runtime: AsyncRuntime) -> None:
+    from .selectable import selectable
+
+    class Example:
+        def __init__(self, offset: int) -> None:
+            self.offset = offset
+
+        @selectable
+        def operation(self, guard: SelectorGuard[int], value: int) -> None:  # pyright: ignore[reportRedeclaration]
+            raise AssertionError("direct calls must not register")
+
+        @operation.call
+        @routine
+        async def operation(self, value: int) -> int:  # pyright: ignore[reportRedeclaration]
+            return value + self.offset
+
+        @operation.call_fn
+        def operation(self, value: int) -> int:
+            return value + self.offset + 1
+
+    example = Example(2)
+    assert assert_type(example.operation(39), int) == 42
+    assert assert_type(Example.operation(example, 39), int) == 42
+
+    async def main() -> None:
+        assert assert_type(await example.operation.a(40), int) == 42
+        assert assert_type(await Example.operation.a(example, 40), int) == 42
+
+    async_runtime.run(main)
+
+
+def test_selectable_call_preserves_routine_fn(async_runtime: AsyncRuntime) -> None:
+    from .selectable import selectable
+
+    @selectable
+    @routine
+    async def operation(guard: SelectorGuard[str]) -> None:
+        raise AssertionError("direct calls must not register")
+
+    @routine
+    async def direct() -> str:  # pyright: ignore[reportRedeclaration]
+        return "async"
+
+    @direct.fn
+    def direct() -> str:
+        return "ordinary"
+
+    configured = operation.call(direct)
+    replaced = configured.call_fn(lambda: "replacement")
+    assert configured() == "ordinary"
+    assert replaced() == "replacement"
+
+    @routine
+    async def main() -> None:
+        assert await configured.a() == "async"
+        assert await replaced.a() == "async"
+        with pytest.raises(RuntimeError, match="await function.a"):
+            configured()
+
+    async_runtime.run(main.a)
+
+
+def test_selectable_overrides_reject_raw_coroutines() -> None:
+    from .selectable import selectable
+
+    @selectable
+    @routine
+    async def operation(guard: SelectorGuard[int]) -> None:
+        raise AssertionError("not called")
+
+    async def direct() -> int:
+        return 42
+
+    with pytest.raises(TypeError, match="@routine"):
+        operation.call(direct)  # pyright: ignore[reportCallIssue, reportArgumentType]
+    with pytest.raises(TypeError, match="ordinary callable"):
+        operation.call(routine(direct)).call_fn(direct)  # pyright: ignore[reportCallIssue, reportArgumentType]
+
+
+def test_selectable_ordinary_overrides_require_routines() -> None:
+    from .selectable import selectable
+
+    @selectable
+    def ordinary(guard: SelectorGuard[int], value: int) -> None:
+        pass
+
+    @selectable
+    @routine
+    async def asynchronous(guard: SelectorGuard[int], value: int) -> None:
+        pass
+
+    def direct(value: int) -> int:
+        return value
+
+    @routine
+    async def direct_routine(value: int) -> int:
+        return value
+
+    assert not hasattr(ordinary, "fn")
+    assert hasattr(asynchronous, "fn")
+    for operation in (ordinary, asynchronous):
+        assert not hasattr(operation, "call_fn")
+        plain = operation.call(direct)
+        assert not hasattr(plain, "call_fn")
+        customized = operation.call(direct_routine).call_fn(lambda value: value + 1)
+        assert customized(41) == 42
+        replaced = customized.call(direct)
+        assert not hasattr(replaced, "call_fn")
+        assert replaced(42) == 42
+        assert customized(41) == 42
