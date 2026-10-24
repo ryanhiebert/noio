@@ -14,6 +14,8 @@ Unreleased
 
 ### Added
 
+- `noio.Event` for persistent completion.
+
 - `noio.shield` to shield routines and other callables from cancellation.
 
 - Custom registration and direct-call implementations for `@selectable`.
