@@ -2,11 +2,10 @@
 
 from typing import cast
 
-from aiologic.lowlevel import shield
-
 from ._event import Event
 from ._lock import Lock
 from .routine import routine
+from .shield import shield
 
 
 class _Selection[T]:
@@ -39,23 +38,13 @@ class _Selection[T]:
         self._pending = False
         self._event.set()
 
+    @shield
     @routine
-    async def invalidate(self) -> None:  # pyright: ignore[reportRedeclaration]
+    async def invalidate(self) -> None:
         """Make every choice ineligible, preserving any committed outcome.
 
         It does not notify waiters: invalidation is not an outcome.
         """
-        await shield(self._invalidate_async())
-
-    @invalidate.fn
-    def invalidate(self) -> None:
-        shield(self._invalidate_sync)()
-
-    def _invalidate_sync(self) -> None:
-        with self._lock:
-            self._pending = False
-
-    async def _invalidate_async(self) -> None:
         async with self._lock:
             self._pending = False
 

@@ -14,6 +14,8 @@ Unreleased
 
 ### Added
 
+- `noio.shield` to shield routines and other callables from cancellation.
+
 - Custom registration and direct-call implementations for `@selectable`.
 
 - Correlated index and value types for `select` results.

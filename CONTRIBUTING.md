@@ -48,6 +48,10 @@ Record user-facing changes in `CHANGELOG.md` under an Unreleased section,
 creating that section when needed.
 At release time, turn it into a dated version entry.
 
+Document ordinary functions and ordinary calls first.
+Present routines as advanced usage.
+Examples should default to ordinary functions and calls wherever practical.
+
 Use semantic line breaks in Markdown prose.
 Start each sentence on a new line,
 and break longer sentences at natural clause or phrase boundaries
