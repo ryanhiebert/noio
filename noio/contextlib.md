@@ -25,6 +25,28 @@ async def temporary_items() -> AsyncIterator[list[str]]:
         items.clear()
 ```
 
+Use `.fn` when ordinary execution needs a separate implementation:
+
+```python
+from collections.abc import Iterator
+
+@temporary_items.fn
+def temporary_items() -> Iterator[list[str]]:
+    items: list[str] = []
+    try:
+        yield items
+    finally:
+        items.clear()
+```
+
+Ordinary entry uses this override, including `async with` inside a routine
+being driven by an ordinary call.
+Awaited entry under an async runtime uses the original async generator.
+The choice happens at entry, and exit uses that same implementation.
+The ordinary generator runs with routine mode cleared,
+so it can call routines normally.
+`.fn` returns a new factory, leaving the original unchanged.
+
 Context managers can decorate routines.
 Place the context decorator above `@noio.routine`;
 decorating a non-routine raises `TypeError`.

@@ -43,6 +43,7 @@ Unreleased
   `SelectionCollisionError` rejects guards belonging to the same selection.
 - `@noio.contextmanager` to create context managers supporting both
   `with` and `async with` from an async generator.
+  `.fn` supplies an ordinary generator implementation.
   Context managers can also decorate existing routines.
 - `noio.ContextManager` as an abstract base class
   for context managers with routine entry and exit methods.
