@@ -138,6 +138,15 @@ class Routine[**P, R, **F = P]:
         owner: type[T] | None = None,
     ) -> Routine[B, R, C]: ...
 
+    # If only the ordinary implementation accepts this instance, expose only
+    # its ordinary call interface.
+    @overload
+    def __get__[T, **B](
+        self: Routine[P, R, Concatenate[T, B]],
+        instance: T,
+        owner: type[T] | None = None,
+    ) -> Callable[B, R]: ...
+
     @overload
     def __get__(
         self, instance: None, owner: type[Any] | None = None
@@ -145,7 +154,7 @@ class Routine[**P, R, **F = P]:
 
     def __get__(
         self, instance: Any, owner: type[Any] | None = None
-    ) -> Routine[..., R, ...]:
+    ) -> Routine[..., R, ...] | Callable[..., R]:
         if self.__class_method is not None:
             result = Routine(self.__class_method.__get__(instance, owner))
             if self.__ordinary is not None:

@@ -1319,3 +1319,37 @@ def test_cleared_mode_same_instance_across_thread_and_async_runtime(
         finally:
             release.set()
         assert future.result(timeout=5) == 42
+
+
+def test_routine_with_different_self_types(async_runtime: AsyncRuntime) -> None:
+    from .routine import Routine
+
+    class Worker[F: Callable[[], int]]:
+        def __init__(self, fn: F) -> None:
+            self.fn = fn
+
+        @routine
+        async def run(  # pyright: ignore[reportRedeclaration]
+            self: Worker[Routine[[], int]],
+        ) -> int:
+            return await self.fn.a()
+
+        @run.fn
+        def run(self: Worker[Callable[[], int]]) -> int:
+            return self.fn()
+
+    @routine
+    async def value() -> int:
+        return 42
+
+    ordinary: Worker[Callable[[], int]] = Worker(lambda: 7)
+    asynchronous = Worker(value)
+    assert_type(ordinary.run, Callable[[], int])
+    assert_type(asynchronous.run, Routine[[], int])
+    assert ordinary.run() == 7
+    assert asynchronous.run() == 42
+
+    async def main() -> None:
+        assert await asynchronous.run.a() == 42
+
+    async_runtime.run(main)

@@ -8,10 +8,6 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 Unreleased
 ----------
 
-### Fixed
-
-- Reject invalid routine cleanup return types in `@selectable` annotations.
-
 ### Added
 
 - `noio.Event` for persistent completion.

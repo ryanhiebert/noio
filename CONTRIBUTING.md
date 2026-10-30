@@ -47,6 +47,8 @@ A handoff test alone does not establish safety during competing partial acquisit
 Record user-facing changes in `CHANGELOG.md` under an Unreleased section,
 creating that section when needed.
 At release time, turn it into a dated version entry.
+List bug fixes only when they correct behavior in a released version.
+Fold corrections to unreleased features into their feature entries instead.
 
 Document ordinary functions and ordinary calls first.
 Present routines as advanced usage.
