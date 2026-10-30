@@ -8,25 +8,17 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 Unreleased
 ----------
 
-### Changed
-
-- `noio.sleep` is selectable. This means it can be used as a timeout for select operations.
-
 ### Added
 
 - `noio.Event` for persistent completion.
 
 - `noio.shield` to shield routines and other callables from cancellation.
 
-- Custom registration and direct-call implementations for `@selectable`.
+- `@noio.selectable.selectable` to make a function or method usable directly or as a selectable,
+  with custom registration and direct-call implementations.
 
-- Correlated index and value types for `select` results.
-
-- Selectable registration may omit cleanup when none is needed.
-
-- `@noio.selectable.selectable` to make a function or method usable directly or as a selectable.
-
-- `noio.select.select` to wait for one of several selectable operations.
+- `noio.select.select` to wait for one of several selectable operations,
+  with correlated index and value types in its results.
 
 - `noio.cleared_mode` to adapt an ordinary callable
   to clear the coroutine execution mode before calling it,
@@ -55,7 +47,8 @@ Unreleased
 - `noio.ContextManager` as an abstract base class
   for context managers with routine entry and exit methods.
 
-- `noio.sleep` to pause execution using the current IO runtime.
+- `noio.sleep` to pause execution using the current IO runtime
+  or provide a timeout in select operations.
 
 [0.1] - 2026-10-17
 -----------------
