@@ -8,6 +8,10 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 Unreleased
 ----------
 
+### Changed
+
+- `noio.sleep` is selectable. This means it can be used as a timeout for select operations.
+
 ### Added
 
 - `noio.Event` for persistent completion.
