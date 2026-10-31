@@ -9,17 +9,22 @@ can still win and complete them with a value or an exception.
 Decorating a function or method
 -------------------------------
 
-Use `@selectable` to make a registration function callable as an operation:
+Use `@selectable` to make a registration context manager callable usable as an operation:
 
 ```python
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 from noio.select import select
 from noio.selectable import SelectorGuard, selectable, selectors
 
 @selectable
-def ready(guard: SelectorGuard[str], value: str) -> None:
+@contextmanager
+def ready(guard: SelectorGuard[str], value: str) -> Iterator[None]:
     with selectors(guard) as (selector,):
         if selector is not None:
             selector.result(value)
+    yield
 
 assert ready("hello") == "hello"
 assert select(ready.select("first"), ready.select("second")) == (0, "first")
@@ -28,26 +33,28 @@ assert select(ready.select("first"), ready.select("second")) == (0, "first")
 A direct call selects that one operation and returns its value.
 `.select(...)` captures the arguments without registering the operation.
 
-For a method that also supports coroutine calls, wrap a [routine](routine.md).
-As with bare routines, you may use `.fn`
-to customize the ordinary implementation separately from the coroutine implementation:
+For a method that also supports coroutine calls, use [noio.contextmanager](contextlib.md).
+`.fn` forwards to that callable to customize its ordinary generator implementation:
 
 ```python
+from collections.abc import AsyncIterator
 import noio
 
 class Greeter:
     @selectable
-    @noio.routine
-    async def greet(self, guard: SelectorGuard[str], name: str) -> None:
+    @noio.contextmanager
+    async def greet(self, guard: SelectorGuard[str], name: str) -> AsyncIterator[None]:
         async with selectors(guard) as (selector,):
             if selector is not None:
                 selector.result(f"Hello, {name}!")
+        yield
 
     @greet.fn
-    def greet(self, guard: SelectorGuard[str], name: str) -> None:
+    def greet(self, guard: SelectorGuard[str], name: str) -> Iterator[None]:
         with selectors(guard) as (selector,):
             if selector is not None:
                 selector.result(f"Hello, {name}!")
+        yield
 
 greeter = Greeter()
 assert greeter.greet("world") == "Hello, world!"
@@ -55,40 +62,38 @@ assert greeter.greet("world") == "Hello, world!"
 
 This also supports `await greeter.greet.a("world")`
 and `await select.a(greeter.greet.select("world"), other)`.
-Both registration implementations receive the guard
-and return a cleanup callback or `None`.
+Both implementations receive the guard and register before yielding.
+Put deregistration after the yield, typically in a `finally` block.
 
 Registration and cleanup
 ------------------------
 
 `Selectable[T]` from `noio.select` describes an operation that can complete with a value of type `T`.
-Implement `__select__(self, guard)` to register the supplied `SelectorGuard[T]`
-and return a callable taking no arguments for cleanup, if needed.
-Return `None`, or omit the return, when there is no cleanup to do.
+Implement `__select__(self, guard)` to return a context manager for the supplied `SelectorGuard[T]`.
+Entering registers the choice; exiting removes the registration.
 Registration may complete the choice immediately or retain its guard for later.
+A generator registration without cleanup still yields once.
 
-Ordinary selection calls registration and cleanup directly.
-For async runtimes, decorate `__select__` and the cleanup function with `@noio.routine`.
-Async selection checks all registration methods before calling any of them
-and raises `TypeError` if one is not a routine.
-The selectable is responsible for returning a valid cleanup
-and for undoing any partial registration if its registration method raises or is cancelled.
+Ordinary selection uses ordinary context-manager entry and exit.
+Async selection requires routine-based `noio.ContextManager` instances;
+it constructs and checks all registration contexts before entering any of them.
+`@noio.contextmanager` supports both forms.
 
-Cleanup runs once for every successfully returned cleanup callback,
-including the winning choice, in reverse registration order.
-Before calling any cleanup, selection makes all its guards unavailable
+Contexts are entered in order, including those after a winner,
+and exited in reverse order, including the winner.
+Before exiting any successfully entered context, selection makes all its guards unavailable
 and finishes any registration that is still running or unwinding.
-This prevents a later registration from inserting an entry after its final cleanup.
-A cleanup callback may remove retained registrations or do nothing
-if the selectable discards unavailable registrations when it encounters them.
+If entry raises or is cancelled, that context must undo its own partial registration.
+
+Every registration exits normally: its exit method receives `(None, None, None)`.
+It does not receive selection errors, cancellation, or another registration's errors.
+Entry values and exit return values are ignored.
+An exit error propagates, but does not prevent the remaining contexts from exiting.
 
 Runtime cancellation propagates even if a choice has already completed.
 Completion is not undone, but the caller does not receive its result.
 Invalidating the guards is protected from cancellation;
-cleanup callbacks run in the caller's context and must handle their own cancellation needs.
-Cleanup callbacks are invoked without checking their types first.
-An invalid callback fails when cleanup attempts to call it
-or await its `.a()` method.
+context exits run in the caller's context and handle their own cancellation needs.
 
 Completing a choice
 -------------------

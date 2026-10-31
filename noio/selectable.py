@@ -9,8 +9,11 @@ does not roll back if the selectable implementation subsequently raises.
 
 from collections.abc import AsyncIterator
 from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import AbstractContextManager
 from copy import copy
 from functools import update_wrapper
+from inspect import isasyncgenfunction
 from inspect import iscoroutinefunction
 from types import MethodType
 from typing import Any
@@ -21,6 +24,7 @@ from typing import cast
 from typing import overload
 
 from ._contextlib import ContextManager
+from ._contextlib import _ContextManagerFactory
 from ._contextlib import contextmanager
 from ._lock import acquire
 from ._selection import SelectorGuard as SelectorGuard
@@ -132,7 +136,7 @@ async def selectors(
 class _Operation[T]:
     def __init__(
         self,
-        register: Callable[..., Callable[[], None] | None],
+        register: Callable[..., AbstractContextManager[Any]],
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         unbound: bool,
@@ -147,14 +151,14 @@ class _Operation[T]:
             return self._args[:1] + (guard,) + self._args[1:]
         return (guard, *self._args)
 
-    def __select__(self, guard: SelectorGuard[T], /) -> Callable[[], None] | None:
+    def __select__(self, guard: SelectorGuard[T], /) -> AbstractContextManager[Any]:
         return self._register(*self._arguments(guard), **self._kwargs)
 
 
 class _RoutineOperation[T]:
     def __init__(
         self,
-        register: Routine[..., Any],
+        register: _ContextManagerFactory[..., Any],
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         unbound: bool,
@@ -164,14 +168,15 @@ class _RoutineOperation[T]:
         self._kwargs = kwargs
         self._unbound = unbound
 
-    @routine
-    async def __select__(self, guard: SelectorGuard[T], /) -> Callable[[], None] | None:
+    @contextmanager
+    async def __select__(self, guard: SelectorGuard[T], /) -> AsyncIterator[Any]:
         args = (
             self._args[:1] + (guard,) + self._args[1:]
             if self._unbound
             else (guard, *self._args)
         )
-        return await self._register.a(*args, **self._kwargs)
+        async with self._register(*args, **self._kwargs) as value:
+            yield value
 
 
 class _UnboundCall[**P, T](Protocol):
@@ -210,7 +215,7 @@ class _CallOverrides:
             raise TypeError(
                 "Wrap coroutine implementations with @routine before applying .call."
             )
-        if isinstance(self._register, Routine):
+        if isinstance(self._register, _ContextManagerFactory):
             wrapper = (
                 _RoutineDirectSelectableCall
                 if isinstance(fn, Routine)
@@ -249,7 +254,10 @@ class _CallOverrides:
 
 class _SelectableCall[**P](_CallOverrides):
     def __init__(
-        self, register: Callable[P, Callable[[], None] | None], *, unbound: bool = False
+        self,
+        register: Callable[P, AbstractContextManager[Any]],
+        *,
+        unbound: bool = False,
     ) -> None:
         self._register = register
         self._unbound = unbound
@@ -366,7 +374,9 @@ class _DirectRoutineSelectableCall[**P](_SelectableCall[P]):
 class _RoutineSelectableCall[**P](_CallOverrides):
     _operation = _RoutineOperation
 
-    def __init__(self, register: Routine[P, Any], *, unbound: bool = False) -> None:
+    def __init__(
+        self, register: _ContextManagerFactory[P, Any], *, unbound: bool = False
+    ) -> None:
         self._register = register
         self._unbound = unbound
         update_wrapper(cast(Callable[..., Any], self), register)
@@ -403,7 +413,7 @@ class _RoutineSelectableCall[**P](_CallOverrides):
         """Return a copy with a direct callable or routine implementation."""
         return self._with_call(fn)
 
-    def fn(self, fn: Callable[P, Callable[[], None] | None], /) -> Self:
+    def fn(self, fn: Callable[P, Iterator[Any]], /) -> Self:
         """Return a copy with an ordinary registration implementation."""
         result = copy(self)
         result._register = self._register.fn(fn)
@@ -486,29 +496,34 @@ class _RoutineDirectSelectableCall[**P](_RoutineSelectableCall[P]):
 
 
 @overload
-# Routine is callable too, but its wrapper additionally exposes .a().
-def selectable[**P, C: Callable[[], None] | None](  # pyright: ignore[reportOverlappingOverload]
-    register: Routine[P, C],
+# noio context manager callables support coroutine calls and .fn overrides.
+def selectable[**P](  # pyright: ignore[reportOverlappingOverload]
+    register: _ContextManagerFactory[P, Any],
 ) -> _RoutineSelectableCall[P]: ...
 
 
 @overload
 def selectable[**P](
-    register: Callable[P, Callable[[], None] | None],
+    register: Callable[P, AbstractContextManager[Any]],
 ) -> _SelectableCall[P]: ...
 
 
 def selectable(register: Any) -> Any:
-    """Make registration callable directly or preparable with .select().
+    """Make a registration context manager callable selectable.
 
-    Wrap a routine to also support .a() and async selection.
     Registration receives the guard before the caller's arguments, after self
-    for methods, and returns a cleanup callback or None.
+    for methods. Entering registers the choice; exiting deregisters it.
+    Use @noio.contextmanager to also support coroutine calls and .fn overrides.
     """
-    if iscoroutinefunction(register):
+    if (
+        iscoroutinefunction(register)
+        or isasyncgenfunction(register)
+        or isinstance(register, Routine)
+    ):
         raise TypeError(
-            "Wrap coroutine implementations with @routine before applying @selectable."
+            "@selectable requires a context manager callable; "
+            "wrap async generators with @noio.contextmanager."
         )
-    if isinstance(register, Routine):
+    if isinstance(register, _ContextManagerFactory):
         return _RoutineSelectableCall(register)
     return _SelectableCall(register)

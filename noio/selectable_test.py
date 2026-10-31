@@ -1,5 +1,8 @@
+from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import contextmanager as sync_contextmanager
 from typing import Any
 from typing import Literal
 from typing import Self
@@ -8,10 +11,10 @@ from typing import assert_type
 import anyio
 import pytest
 
+from noio import contextmanager
 from noio import routine
 from noio._lock import Lock
 from noio._selection import _Selection
-from noio.routine import Routine
 from noio.select import select
 from noio.selectable import SelectionCollisionError
 from noio.selectable import Selector
@@ -308,14 +311,18 @@ def _check_selectable_functions_and_methods(checkpoint: Callable[[], None]) -> N
     log: list[str] = []
 
     @selectable
+    @sync_contextmanager
     def operation(
         guard: SelectorGuard[int], value: int, *, scale: int = 2
-    ) -> Callable[[], None]:
+    ) -> Iterator[None]:
         log.append("register")
         with selectors(guard) as (selector,):
             assert selector is not None
             selector.result(value * scale)
-        return lambda: log.append("cleanup")
+        try:
+            yield
+        finally:
+            log.append("cleanup")
 
     prepared = operation.select(3, scale=4)
     assert not log
@@ -329,13 +336,14 @@ def _check_selectable_functions_and_methods(checkpoint: Callable[[], None]) -> N
             self.offset = offset
 
         @selectable
+        @sync_contextmanager
         def calculate(
             self, guard: SelectorGuard[int], value: int, *, scale: int = 2
-        ) -> Callable[[], None]:
+        ) -> Iterator[None]:
             with selectors(guard) as (selector,):
                 assert selector is not None
                 selector.result(self.offset + value * scale)
-            return lambda: None
+            yield
 
     class Child(Counter):
         pass
@@ -366,29 +374,35 @@ def test_selectable_routine_functions_and_methods(async_runtime: AsyncRuntime) -
         log.append("cleanup")
 
     @selectable
-    @routine
+    @contextmanager
     async def operation(
         guard: SelectorGuard[int], value: int, *, scale: int = 2
-    ) -> Routine[[], None]:
+    ) -> AsyncIterator[None]:
         log.append("register")
         async with selectors(guard) as (selector,):
             assert selector is not None
             selector.result(value * scale)
-        return cleanup
+        try:
+            yield
+        finally:
+            await cleanup.a()
 
     class Counter:
         def __init__(self, offset: int):
             self.offset = offset
 
         @selectable
-        @routine
+        @contextmanager
         async def calculate(
             self, guard: SelectorGuard[int], value: int, *, scale: int = 2
-        ) -> Routine[[], None]:
+        ) -> AsyncIterator[None]:
             async with selectors(guard) as (selector,):
                 assert selector is not None
                 selector.result(self.offset + value * scale)
-            return cleanup
+            try:
+                yield
+            finally:
+                await cleanup.a()
 
     class Child(Counter):
         pass
@@ -429,7 +443,7 @@ def test_selectable_rejects_bare_coroutine() -> None:
     invalid: Any = registration
     with pytest.raises(
         TypeError,
-        match="Wrap coroutine implementations with @routine",
+        match="requires a context manager callable",
     ):
         selectable(invalid)
 
@@ -448,8 +462,8 @@ def test_selectable_prepared_operation_shared_across_runtimes(
     cleaned: list[SelectorGuard[int]] = []
 
     @selectable
-    @routine
-    async def operation(guard: SelectorGuard[int], value: int) -> Routine[[], None]:
+    @contextmanager
+    async def operation(guard: SelectorGuard[int], value: int) -> AsyncIterator[None]:
         async with lock:
             guards.append(guard)
             first = len(guards) == 1
@@ -467,7 +481,10 @@ def test_selectable_prepared_operation_shared_across_runtimes(
             async with lock:
                 cleaned.append(guard)
 
-        return cleanup
+        try:
+            yield
+        finally:
+            await cleanup.a()
 
     prepared = operation.select(42)
     assert not guards
@@ -497,8 +514,10 @@ def test_selectable_direct_call_cancellation_cleans_up(backend: str) -> None:
         cleaned: list[bool] = []
 
         @selectable
-        @routine
-        async def operation(guard: SelectorGuard[int], value: int) -> Routine[[], None]:
+        @contextmanager
+        async def operation(
+            guard: SelectorGuard[int], value: int
+        ) -> AsyncIterator[None]:
             @routine
             async def cleanup() -> None:
                 with anyio.CancelScope(shield=True):
@@ -507,7 +526,10 @@ def test_selectable_direct_call_cancellation_cleans_up(backend: str) -> None:
                 cleaned.append(True)
 
             registered.set()
-            return cleanup
+            try:
+                yield
+            finally:
+                await cleanup.a()
 
         async with anyio.create_task_group() as group:
             group.start_soon(operation.a, 42)
@@ -525,11 +547,15 @@ def test_selectable_direct_calls_raise_delivered_errors() -> None:
     cleaned: list[bool] = []
 
     @selectable
-    def operation(guard: SelectorGuard[int]) -> Callable[[], None]:
+    @sync_contextmanager
+    def operation(guard: SelectorGuard[int]) -> Iterator[None]:
         with selectors(guard) as (selector,):
             assert selector is not None
             selector.error(error)
-        return lambda: cleaned.append(True)
+        try:
+            yield
+        finally:
+            cleaned.append(True)
 
     with pytest.raises(ValueError) as raised:
         operation()
@@ -543,27 +569,31 @@ def test_selectable_typing_rejects_invalid_calls(tmp_path: Any) -> None:
     import sys
     from pathlib import Path
 
-    source = """from collections.abc import Callable
+    source = """from collections.abc import Iterator, AsyncIterator
+from contextlib import contextmanager as sync_contextmanager
+from noio import contextmanager
 from noio import routine
 from noio.select import select
 from noio.selectable import selectable
 from noio.selectable import SelectorGuard
 
 @selectable
+@sync_contextmanager
 def ordinary(
     guard: SelectorGuard[int], value: str, *, count: int = 1
-) -> Callable[[], None]:
-    return lambda: None
+) -> Iterator[None]:
+    yield
 
 @selectable
-@routine
-async def asynchronous(guard: SelectorGuard[int], value: str) -> Callable[[], None]:
-    return lambda: None
+@contextmanager
+async def asynchronous(guard: SelectorGuard[int], value: str) -> AsyncIterator[None]:
+    yield
 
 class Example:
     @selectable
-    def method(self, guard: SelectorGuard[int], value: str) -> Callable[[], None]:
-        return lambda: None
+    @sync_contextmanager
+    def method(self, guard: SelectorGuard[int], value: str) -> Iterator[None]:
+        yield
 
 @routine
 async def invalid_cleanup(guard: SelectorGuard[int]) -> int:
@@ -650,17 +680,22 @@ def test_decorated_registration_without_cleanup(async_runtime: AsyncRuntime) -> 
     from .selectable import selectable
 
     @selectable
-    def ordinary(guard: SelectorGuard[int], value: int) -> None:
+    @sync_contextmanager
+    def ordinary(guard: SelectorGuard[int], value: int) -> Iterator[None]:
         with selectors(guard) as (selector,):
             if selector is not None:
                 selector.result(value)
+        yield
 
     @selectable
-    @routine
-    async def asynchronous(guard: SelectorGuard[int], value: int) -> None:
+    @contextmanager
+    async def asynchronous(
+        guard: SelectorGuard[int], value: int
+    ) -> AsyncIterator[None]:
         async with selectors(guard) as (selector,):
             if selector is not None:
                 selector.result(value)
+        yield
 
     assert assert_type(ordinary(42), int) == 42
     assert assert_type(asynchronous(42), int) == 42
@@ -682,22 +717,26 @@ def test_selectable_implementation_overrides(
     log: list[str] = []
 
     @selectable
-    @routine
+    @contextmanager
     async def operation(  # pyright: ignore[reportRedeclaration]
         guard: SelectorGuard[int], value: int, *, offset: int = 0
-    ) -> None:
+    ) -> AsyncIterator[None]:
         log.append("async registration")
         async with selectors(guard) as (selector,):
             assert selector is not None
             selector.result(value + offset)
+        yield
 
     original = operation
 
-    def register(guard: SelectorGuard[int], value: int, *, offset: int = 0) -> None:
+    def register(
+        guard: SelectorGuard[int], value: int, *, offset: int = 0
+    ) -> Iterator[None]:
         log.append("ordinary registration")
         with selectors(guard) as (selector,):
             assert selector is not None
             selector.result(value + offset)
+        yield
 
     @routine
     async def direct(value: int, *, offset: int = 0) -> int:
@@ -742,17 +781,21 @@ def test_selectable_method_overrides(async_runtime: AsyncRuntime) -> None:
             self.prefix = prefix
 
         @selectable
-        @routine
-        async def operation(self, guard: SelectorGuard[str], value: int) -> None:  # pyright: ignore[reportRedeclaration]
+        @contextmanager
+        async def operation(  # pyright: ignore[reportRedeclaration]
+            self, guard: SelectorGuard[str], value: int
+        ) -> AsyncIterator[None]:
             async with selectors(guard) as (selector,):
                 assert selector is not None
                 selector.result(f"{self.prefix} async registration {value}")
+            yield
 
         @operation.fn
-        def operation(self, guard: SelectorGuard[str], value: int) -> None:  # pyright: ignore[reportRedeclaration]
+        def operation(self, guard: SelectorGuard[str], value: int) -> Iterator[None]:  # pyright: ignore[reportRedeclaration]
             with selectors(guard) as (selector,):
                 assert selector is not None
                 selector.result(f"{self.prefix} ordinary registration {value}")
+            yield
 
         @operation.call
         @routine
@@ -804,8 +847,10 @@ def test_ordinary_selectable_direct_overrides(async_runtime: AsyncRuntime) -> No
     from .selectable import selectable
 
     @selectable
-    def operation(guard: SelectorGuard[int], value: int) -> None:
+    @sync_contextmanager
+    def operation(guard: SelectorGuard[int], value: int) -> Iterator[None]:
         raise AssertionError("direct calls must not register")
+        yield
 
     def ordinary(value: int) -> int:
         return value + 1
@@ -825,7 +870,7 @@ def test_ordinary_selectable_direct_overrides(async_runtime: AsyncRuntime) -> No
     async def main() -> None:
         assert assert_type(await first.a(40), int) == 42
         # A direct coroutine implementation does not make registration async.
-        with pytest.raises(TypeError, match="implemented with routines"):
+        with pytest.raises(TypeError, match="requires routine-based context managers"):
             await select.a(first.select(42))  # pyright: ignore[reportCallIssue, reportArgumentType]
 
     async_runtime.run(main)
@@ -839,8 +884,10 @@ def test_ordinary_selectable_direct_routine_method(async_runtime: AsyncRuntime) 
             self.offset = offset
 
         @selectable
-        def operation(self, guard: SelectorGuard[int], value: int) -> None:  # pyright: ignore[reportRedeclaration]
+        @sync_contextmanager
+        def operation(self, guard: SelectorGuard[int], value: int) -> Iterator[None]:  # pyright: ignore[reportRedeclaration]
             raise AssertionError("direct calls must not register")
+            yield
 
         @operation.call
         @routine
@@ -866,9 +913,10 @@ def test_selectable_call_preserves_routine_fn(async_runtime: AsyncRuntime) -> No
     from .selectable import selectable
 
     @selectable
-    @routine
-    async def operation(guard: SelectorGuard[str]) -> None:
+    @contextmanager
+    async def operation(guard: SelectorGuard[str]) -> AsyncIterator[None]:
         raise AssertionError("direct calls must not register")
+        yield
 
     @routine
     async def direct() -> str:  # pyright: ignore[reportRedeclaration]
@@ -897,9 +945,10 @@ def test_selectable_overrides_reject_raw_coroutines() -> None:
     from .selectable import selectable
 
     @selectable
-    @routine
-    async def operation(guard: SelectorGuard[int]) -> None:
+    @contextmanager
+    async def operation(guard: SelectorGuard[int]) -> AsyncIterator[None]:
         raise AssertionError("not called")
+        yield
 
     async def direct() -> int:
         return 42
@@ -914,13 +963,18 @@ def test_selectable_ordinary_overrides_require_routines() -> None:
     from .selectable import selectable
 
     @selectable
-    def ordinary(guard: SelectorGuard[int], value: int) -> None:
+    @sync_contextmanager
+    def ordinary(guard: SelectorGuard[int], value: int) -> Iterator[None]:
         pass
+        yield
 
     @selectable
-    @routine
-    async def asynchronous(guard: SelectorGuard[int], value: int) -> None:
+    @contextmanager
+    async def asynchronous(
+        guard: SelectorGuard[int], value: int
+    ) -> AsyncIterator[None]:
         pass
+        yield
 
     def direct(value: int) -> int:
         return value

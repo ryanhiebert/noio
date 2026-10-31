@@ -45,7 +45,7 @@ Awaited entry under an async runtime uses the original async generator.
 The choice happens at entry, and exit uses that same implementation.
 The ordinary generator runs with routine mode cleared,
 so it can call routines normally.
-`.fn` returns a new factory, leaving the original unchanged.
+`.fn` returns a new context manager callable, leaving the original unchanged.
 
 Context managers can decorate routines.
 Place the context decorator above `@noio.routine`;

@@ -152,7 +152,7 @@ class _ContextManagerFactory[**P, T]:
         self,
         fn: Callable[P, Iterator[T]] | _CompatibleFunctionDescriptor[P, P, Iterator[T]],
     ) -> Self:
-        """Return a new factory with an ordinary context-manager implementation."""
+        """Return a new context manager callable with an ordinary implementation."""
         if isinstance(fn, classmethod | staticmethod):
             fn = cast(Callable[P, Iterator[T]], fn.__func__)
         if not callable(fn) or isasyncgenfunction(fn) or iscoroutinefunction(fn):

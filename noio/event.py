@@ -1,7 +1,9 @@
 """Persistent completion with selectable waiting."""
 
+from collections.abc import AsyncIterator
+
+from ._contextlib import contextmanager
 from ._lock import Lock
-from .routine import Routine
 from .routine import routine
 from .selectable import SelectorGuard
 from .selectable import selectable
@@ -34,16 +36,15 @@ class Event:
             self._waiters.clear()
 
     @selectable
-    @routine
-    async def wait(self, guard: SelectorGuard[None]) -> Routine[[], None] | None:
+    @contextmanager
+    async def wait(self, guard: SelectorGuard[None]) -> AsyncIterator[None]:
         """Wait for completion, returning None; prepare with wait.select()."""
         async with self._lock, selectors(guard) as (selector,):
-            if selector is None:
-                return None
-            if self._is_set:
-                selector.result(None)
-                return None
-            self._waiters[guard] = None
+            if selector is not None:
+                if self._is_set:
+                    selector.result(None)
+                else:
+                    self._waiters[guard] = None
 
         @shield
         @routine
@@ -51,4 +52,7 @@ class Event:
             async with self._lock:
                 self._waiters.pop(guard, None)
 
-        return cleanup
+        try:
+            yield
+        finally:
+            await cleanup.a()

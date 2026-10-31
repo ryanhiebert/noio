@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from collections.abc import Callable
 from math import inf
 from math import nan
@@ -8,6 +9,7 @@ import pytest
 from aiologic.lowlevel import current_green_library
 
 import noio
+from noio import contextmanager
 
 from .conftest import AsyncRuntime
 from .conftest import RunSync
@@ -153,9 +155,10 @@ def test_sleep_registration_timing() -> None:
     from .selectable import selectable
 
     @selectable
-    @noio.routine
-    async def delay_registration(guard: SelectorGuard[None]) -> None:
+    @contextmanager
+    async def delay_registration(guard: SelectorGuard[None]) -> AsyncIterator[None]:
         await trio.sleep(7)
+        yield
 
     async def main() -> None:
         operation = noio.sleep.select(10)
@@ -213,9 +216,10 @@ async def _zero_yields_before_completion() -> None:
     yielded: list[bool] = []
 
     @selectable
-    @noio.routine
-    async def first(guard: SelectorGuard[None]) -> None:
+    @contextmanager
+    async def first(guard: SelectorGuard[None]) -> AsyncIterator[None]:
         guards.append(guard)
+        yield
 
     @noio.routine
     async def checkpoint(seconds: float) -> None:
@@ -260,7 +264,6 @@ async def _timer_loses_while_waiting_for_selection_lock() -> None:
     from ._contextlib import contextmanager
     from ._event import Event
     from ._selection import _Selection
-    from .routine import Routine
     from .selectable import SelectorGuard
     from .selectable import selectors
 
@@ -278,12 +281,12 @@ async def _timer_loses_while_waiting_for_selection_lock() -> None:
         patch.setattr(import_module("noio.sleep"), "selectors", observed_selectors)
         async with selectors(guard) as (winner,):
             assert winner is not None
-            cleanup = await noio.sleep.select(0.001).__select__.a(guard)
-            assert isinstance(cleanup, Routine)
+            cleanup = noio.sleep.select(0.001).__select__(guard)
+            await cleanup.__aenter__()
             # The timer has expired, but its completion must acquire this lock.
             await attempting.wait.a()
             winner.result(None)
-        await cleanup.a()
+        await cleanup.__aexit__(None, None, None)
         assert await selection.wait.a() == (0, None)
 
 

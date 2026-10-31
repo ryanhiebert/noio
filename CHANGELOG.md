@@ -15,7 +15,7 @@ Unreleased
 - `noio.shield` to shield routines and other callables from cancellation.
 
 - `@noio.selectable.selectable` to make a function or method usable directly or as a selectable,
-  with custom registration and direct-call implementations.
+  with context-manager registrations and custom direct-call implementations.
 
 - `noio.select.select` to wait for one of several selectable operations,
   with correlated index and value types in its results.

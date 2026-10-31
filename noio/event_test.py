@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event as ThreadEvent
@@ -6,11 +7,12 @@ from typing import Self
 import anyio
 import pytest
 
+from noio import ContextManager
 from noio import Event
+from noio import contextmanager
 from noio import routine
 from noio._lock import Lock
 from noio._selection import _Selection
-from noio.routine import Routine
 from noio.select import select
 from noio.selectable import SelectorGuard
 from noio.selectable import selectable
@@ -170,7 +172,9 @@ def test_cancel_partial_registration(backend: str, blocked_on: str) -> None:
 
         async def register() -> None:
             with scope:
-                await event.wait.select().__select__.a(SelectorGuard(state, 0))
+                await (
+                    event.wait.select().__select__(SelectorGuard(state, 0)).__aenter__()
+                )
                 pytest.fail("cancelled registration completed")
 
         async with anyio.create_task_group() as group, lock:
@@ -190,12 +194,12 @@ def test_registration_holds_event_lock_until_visible_to_set(backend: str) -> Non
     async def main() -> None:
         event = Event()
         state = _Selection[None]()
-        cleanups: list[Routine[[], None]] = []
+        cleanups: list[ContextManager[None]] = []
         finished = anyio.Event()
 
         async def register() -> None:
-            cleanup = await event.wait.select().__select__.a(SelectorGuard(state, 0))
-            assert isinstance(cleanup, Routine)
+            cleanup = event.wait.select().__select__(SelectorGuard(state, 0))
+            await cleanup.__aenter__()
             cleanups.append(cleanup)
 
         async def setter() -> None:
@@ -212,7 +216,7 @@ def test_registration_holds_event_lock_until_visible_to_set(backend: str) -> Non
             assert not finished.is_set()
             assert not event._is_set
         assert await state.wait.a() == (0, None)
-        await cleanups[0].a()
+        await cleanups[0].__aexit__(None, None, None)
         assert not event._waiters
 
     anyio.run(main, backend=backend)
@@ -225,8 +229,11 @@ def test_partial_notification_survives_cancellation_and_competing_operations(
     async def main() -> None:
         event = Event()
         first, second = _Selection[None](), _Selection[None]()
+        registrations = []
         for state in (first, second):
-            assert await event.wait.select().__select__.a(SelectorGuard(state, 0))
+            registration = event.wait.select().__select__(SelectorGuard(state, 0))
+            await registration.__aenter__()
+            registrations.append(registration)
         scope = anyio.CancelScope()
         finished: list[str] = []
 
@@ -258,6 +265,8 @@ def test_partial_notification_survives_cancellation_and_competing_operations(
         assert set(finished) == {"setter", "another setter", "late waiter"}
         assert await first.wait.a() == (0, None)
         assert await second.wait.a() == (0, None)
+        for registration in reversed(registrations):
+            await registration.__aexit__(None, None, None)
         assert not event._waiters
 
     anyio.run(main, backend=backend)
@@ -298,7 +307,7 @@ def _check_green_notification(checkpoint: Callable[[], None]) -> None:
     event = Event()
     state = _Selection[None]()
     cleanup = event.wait.select().__select__(SelectorGuard(state, 0))
-    assert cleanup is not None
+    cleanup.__enter__()
     attempted = GreenEvent()
 
     class ObservedLock(Lock):
@@ -319,7 +328,7 @@ def _check_green_notification(checkpoint: Callable[[], None]) -> None:
         assert not setter.dead
     setter.get(timeout=2)
     assert state.wait() == (0, None)
-    cleanup()
+    cleanup.__exit__(None, None, None)
     assert not event._waiters
     event.wait()
 
@@ -347,14 +356,13 @@ def test_same_event_and_prepared_wait_across_threads_asyncio_and_trio() -> None:
     )
 
     @selectable
-    @routine
+    @contextmanager
     async def observed(
         guard: SelectorGuard[None], ready: ThreadEvent
-    ) -> Routine[[], None] | None:
-        cleanup = await prepared.__select__.a(guard)
-        ready.set()
-        assert cleanup is None or isinstance(cleanup, Routine)
-        return cleanup
+    ) -> AsyncIterator[None]:
+        async with prepared.__select__(guard):
+            ready.set()
+            yield
 
     async def trio_main() -> tuple[int, None]:
         with trio.fail_after(5):
@@ -393,12 +401,11 @@ def _check_cross_runtime_wakeup(checkpoint: Callable[[], None]) -> None:
     registered = ThreadEvent()
 
     @selectable
-    @routine
-    async def observed(guard: SelectorGuard[None]) -> Routine[[], None] | None:
-        cleanup = await event.wait.select().__select__.a(guard)
-        assert cleanup is None or isinstance(cleanup, Routine)
-        registered.set()
-        return cleanup
+    @contextmanager
+    async def observed(guard: SelectorGuard[None]) -> AsyncIterator[None]:
+        async with event.wait.select().__select__(guard):
+            registered.set()
+            yield
 
     def setter() -> None:
         assert registered.wait(2)
@@ -430,8 +437,8 @@ def test_repeated_asyncio_cancellation_during_shielded_work(operation: str) -> N
                 return await super().__aenter__()
 
         state = _Selection[None]()
-        cleanup = await event.wait.select().__select__.a(SelectorGuard(state, 0))
-        assert isinstance(cleanup, Routine)
+        cleanup = event.wait.select().__select__(SelectorGuard(state, 0))
+        await cleanup.__aenter__()
         lock = ObservedLock()
         if operation == "set":
             state._lock = lock
@@ -442,7 +449,7 @@ def test_repeated_asyncio_cancellation_during_shielded_work(operation: str) -> N
             if operation != "cleanup":
                 await event.set.a()
             else:
-                await cleanup.a()
+                await cleanup.__aexit__(None, None, None)
 
         async with lock:
             attempted.clear()
@@ -458,6 +465,7 @@ def test_repeated_asyncio_cancellation_during_shielded_work(operation: str) -> N
             await task
         assert not event._waiters
         if operation != "cleanup":
+            await cleanup.__aexit__(None, None, None)
             assert await state.wait.a() == (0, None)
         else:
             assert not event._is_set
@@ -471,8 +479,11 @@ def test_two_events_compete_for_one_selection(backend: str) -> None:
     async def main() -> None:
         first, second = Event(), Event()
         state = _Selection[None]()
+        registrations = []
         for index, event in enumerate((first, second)):
-            assert await event.wait.select().__select__.a(SelectorGuard(state, index))
+            registration = event.wait.select().__select__(SelectorGuard(state, index))
+            await registration.__aenter__()
+            registrations.append(registration)
         async with anyio.create_task_group() as group, state._lock:
             group.start_soon(first.set.a)
             group.start_soon(second.set.a)
@@ -482,6 +493,8 @@ def test_two_events_compete_for_one_selection(backend: str) -> None:
             assert first._is_set and second._is_set
             assert state._pending
         assert await state.wait.a() in ((0, None), (1, None))
+        for registration in reversed(registrations):
+            await registration.__aexit__(None, None, None)
         assert not first._waiters and not second._waiters
         await first.wait.a()
         await second.wait.a()

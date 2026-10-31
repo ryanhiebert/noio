@@ -1,4 +1,7 @@
+from collections.abc import AsyncIterator
 from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import contextmanager as sync_contextmanager
 from contextvars import ContextVar
 from typing import Any
 from typing import Literal
@@ -8,6 +11,7 @@ import anyio
 import pytest
 
 from noio import cleared_mode
+from noio import contextmanager
 from noio import routine
 from noio._lock import Lock
 from noio.routine import Routine
@@ -27,14 +31,18 @@ class OrdinaryChoice:
         self.name = name
         self.guard: SelectorGuard[str] | None = None
 
-    def __select__(self, guard: SelectorGuard[str]) -> Callable[[], None]:
+    @sync_contextmanager
+    def __select__(self, guard: SelectorGuard[str]) -> Iterator[None]:
         self.guard = guard
         self.log.append(f"register {self.name}")
         if self.value is not None:
             with selectors(guard) as (selector,):
                 if selector is not None:
                     selector.result(self.value)
-        return self.cleanup
+        try:
+            yield
+        finally:
+            self.cleanup()
 
     def cleanup(self) -> None:
         assert self.guard is not None
@@ -50,9 +58,13 @@ class DualChoice:
         self.name = name
         self.guard: SelectorGuard[str] | None = None
 
-    @routine
-    async def __select__(self, guard: SelectorGuard[str]) -> Routine[[], None]:
-        return await self._register(guard)
+    @contextmanager
+    async def __select__(self, guard: SelectorGuard[str]) -> AsyncIterator[None]:
+        await self._register(guard)
+        try:
+            yield
+        finally:
+            await self.cleanup.a()
 
     @routine
     async def cleanup(self) -> None:
@@ -91,10 +103,12 @@ def _check_sync(checkpoint: Callable[[], None]) -> None:
     lock = Lock()
 
     class OwnedChoice(OrdinaryChoice):
-        def __select__(self, guard: SelectorGuard[str]) -> Callable[[], None]:
+        @sync_contextmanager
+        def __select__(self, guard: SelectorGuard[str]) -> Iterator[None]:
             lock.__enter__()
             marker.set("registered")
-            return super().__select__(guard)
+            with super().__select__(guard):
+                yield
 
         def cleanup(self) -> None:
             assert marker.get() == "registered"
@@ -119,9 +133,7 @@ def test_async_registration_and_cleanup(async_runtime: AsyncRuntime) -> None:
         with pytest.raises(ValueError):
             await select.a()
         log.clear()
-        with pytest.raises(
-            TypeError, match="requires selectables to be implemented with routines"
-        ):
+        with pytest.raises(TypeError, match="requires routine-based context managers"):
             await select.a(  # pyright: ignore[reportCallIssue]
                 choices[0],
                 OrdinaryChoice("bad", log, "ordinary"),  # pyright: ignore[reportArgumentType]
@@ -251,7 +263,7 @@ def test_cancel_registration_then_attempt_every_cleanup(backend: str) -> None:
 
 
 @pytest.mark.parametrize("registration_fails", [True, False])
-def test_registration_failure_and_bad_cleanup(
+def test_registration_and_cleanup_failure(
     async_runtime: AsyncRuntime, registration_fails: bool
 ) -> None:
     async def main() -> None:
@@ -259,17 +271,22 @@ def test_registration_failure_and_bad_cleanup(
         guards: list[SelectorGuard[str]] = []
 
         class Broken:
-            @routine
-            async def __select__(self, guard: SelectorGuard[str]) -> Any:
+            @contextmanager
+            async def __select__(
+                self, guard: SelectorGuard[str]
+            ) -> AsyncIterator[None]:
                 guards.append(guard)
                 if registration_fails:
                     raise ValueError("registration")
                 async with selectors(guard) as (selector,):
                     assert selector is not None
                     selector.result("complete")
-                return lambda: pytest.fail("ordinary cleanup must not be invoked")
+                try:
+                    yield
+                finally:
+                    raise ValueError("cleanup")
 
-        expected = ValueError if registration_fails else AttributeError
+        expected = ValueError
         with pytest.raises(expected):
             await select.a(
                 DualChoice(None, log, "first"), Broken(), DualChoice(None, log, "last")
@@ -426,8 +443,8 @@ def test_routine_selectable_with_local_cleanup() -> None:
     log: list[str] = []
 
     class Choice:
-        @routine
-        async def __select__(self, guard: SelectorGuard[int]) -> Routine[[], None]:
+        @contextmanager
+        async def __select__(self, guard: SelectorGuard[int]) -> AsyncIterator[None]:
             async with selectors(guard) as (selector,):
                 assert selector is not None
                 selector.result(42)
@@ -436,7 +453,10 @@ def test_routine_selectable_with_local_cleanup() -> None:
             async def cleanup() -> None:
                 log.append("cleanup")
 
-            return cleanup
+            try:
+                yield
+            finally:
+                await cleanup.a()
 
     choice: Selectable[int] = Choice()
     assert assert_type(select(choice), tuple[Literal[0], int]) == (0, 42)
@@ -465,10 +485,12 @@ def _check_sync_registration_failure_invalidates_before_cleanup(
     guards: list[SelectorGuard[str]] = []
 
     class Broken(OrdinaryChoice):
-        def __select__(self, guard: SelectorGuard[str]) -> Callable[[], None]:
+        @sync_contextmanager
+        def __select__(self, guard: SelectorGuard[str]) -> Iterator[None]:
             guards.append(guard)
             checkpoint()
             raise ValueError("registration failed")
+            yield
 
     with pytest.raises(ValueError, match="registration failed"):
         select(OrdinaryChoice(None, log, "first"), Broken(None, log, "broken"))
@@ -524,22 +546,29 @@ def _check_sync_cleanup_accepts_either_callable(checkpoint: Callable[[], None]) 
         def __init__(self, callback: Callable[[], None]) -> None:
             self.callback = callback
 
-        def __select__(self, guard: SelectorGuard[int]) -> Callable[[], None]:
+        @sync_contextmanager
+        def __select__(self, guard: SelectorGuard[int]) -> Iterator[None]:
             with selectors(guard) as (selector,):
                 assert selector is not None
                 selector.result(42)
-            return self.callback
+            try:
+                yield
+            finally:
+                self.callback()
 
     class Dual:
         def __init__(self, callback: Callable[[], None]) -> None:
             self.callback = callback
 
-        @routine
-        async def __select__(self, guard: SelectorGuard[int]) -> Callable[[], None]:
+        @contextmanager
+        async def __select__(self, guard: SelectorGuard[int]) -> AsyncIterator[None]:
             async with selectors(guard) as (selector,):
                 assert selector is not None
                 selector.result(42)
-            return self.callback
+            try:
+                yield
+            finally:
+                cleared_mode(self.callback)()
 
     for choice_type in (Ordinary, Dual):
         for callback in (cleanup, routine_cleanup):
@@ -563,12 +592,16 @@ def test_cleared_mode_registration_is_ordinary_only(
 
     class Choice:
         @cleared_mode
-        def __select__(self, guard: SelectorGuard[int]) -> Callable[[], None]:
+        @sync_contextmanager
+        def __select__(self, guard: SelectorGuard[int]) -> Iterator[None]:
             log.append("register")
             with selectors(guard) as (selector,):
                 assert selector is not None
                 selector.result(42)
-            return self.cleanup
+            try:
+                yield
+            finally:
+                self.cleanup()
 
         @cleared_mode
         def cleanup(self) -> None:
@@ -580,70 +613,40 @@ def test_cleared_mode_registration_is_ordinary_only(
     log.clear()
 
     async def main() -> None:
-        with pytest.raises(
-            TypeError, match="requires selectables to be implemented with routines"
-        ):
+        with pytest.raises(TypeError, match="requires routine-based context managers"):
             await select.a(choice)  # pyright: ignore[reportArgumentType, reportCallIssue]
         assert not log
 
     async_runtime.run(main)
 
 
-def test_invalid_ordinary_cleanup_fails_during_cleanup() -> None:
+def test_invalid_context_manager_unwinds_earlier_registrations() -> None:
     log: list[str] = []
 
-    class Broken(OrdinaryChoice):
+    class Broken:
         def __select__(self, guard: SelectorGuard[str]) -> Any:
-            super().__select__(guard)
             return 42
 
-    with pytest.raises(TypeError):
+    with pytest.raises(AttributeError, match="__enter__"):
         select(
             OrdinaryChoice(None, log, "first"),
-            Broken("winner", log, "broken"),
+            Broken(),
             OrdinaryChoice(None, log, "last"),
         )
-    assert log == [
-        "register first",
-        "register broken",
-        "register last",
-        "cleanup last",
-        "cleanup first",
-    ]
-
-
-def test_async_cleanup_uses_duck_typing(async_runtime: AsyncRuntime) -> None:
-    log: list[str] = []
-
-    class Cleanup:
-        async def a(self) -> None:
-            await async_runtime.checkpoint()
-            log.append("cleanup")
-
-    class Choice:
-        @routine
-        async def __select__(self, guard: SelectorGuard[int]) -> Any:
-            async with selectors(guard) as (selector,):
-                assert selector is not None
-                selector.result(42)
-            return Cleanup()
-
-    async def main() -> None:
-        assert await select.a(Choice()) == (0, 42)
-        assert log == ["cleanup"]
-
-    async_runtime.run(main)
+    assert log == ["register first", "cleanup first"]
 
 
 def _check_registration_without_cleanup(checkpoint: Callable[[], None]) -> None:
     guards: list[SelectorGuard[int]] = []
 
     class Ready:
-        def __select__(self, guard: SelectorGuard[int]) -> None:
+        @sync_contextmanager
+        def __select__(self, guard: SelectorGuard[int]) -> Iterator[None]:
             guards.append(guard)
             with selectors(guard) as (selector,):
                 if selector is not None:
                     selector.result(42)
+            yield
 
     assert assert_type(
         select(Ready(), Ready()), tuple[Literal[0], int] | tuple[Literal[1], int]
@@ -662,12 +665,13 @@ def test_routine_registration_without_cleanup(async_runtime: AsyncRuntime) -> No
     guards: list[SelectorGuard[int]] = []
 
     class Ready:
-        @routine
-        async def __select__(self, guard: SelectorGuard[int]) -> None:
+        @contextmanager
+        async def __select__(self, guard: SelectorGuard[int]) -> AsyncIterator[None]:
             guards.append(guard)
             async with selectors(guard) as (selector,):
                 if selector is not None:
                     selector.result(42)
+            yield
 
     async def main() -> None:
         assert assert_type(
@@ -686,22 +690,25 @@ class _TypedChoice[T]:
         self.value = value
         self.ready = ready
 
-    @routine
-    async def __select__(self, guard: SelectorGuard[T]) -> None:
+    @contextmanager
+    async def __select__(self, guard: SelectorGuard[T]) -> AsyncIterator[None]:
         if self.ready:
             async with selectors(guard) as (selector,):
                 if selector is not None:
                     selector.result(self.value)
+        yield
 
 
 class _OrdinaryTypedChoice[T]:
     def __init__(self, value: T) -> None:
         self.value = value
 
-    def __select__(self, guard: SelectorGuard[T]) -> None:
+    @sync_contextmanager
+    def __select__(self, guard: SelectorGuard[T]) -> Iterator[None]:
         with selectors(guard) as (selector,):
             if selector is not None:
                 selector.result(self.value)
+        yield
 
 
 def test_select_correlates_index_and_value() -> None:
@@ -1000,3 +1007,87 @@ def test_select_extended_result_types(async_runtime: AsyncRuntime) -> None:
         assert assert_type(result[1], set[int]) == {9}
 
     async_runtime.run(last)
+
+
+@routine
+async def exercise_registration_isolation(failure: str) -> None:
+    log: list[str] = []
+    error = ValueError(failure)
+
+    class Registration:
+        def __init__(self, name: str, guard: SelectorGuard[int]) -> None:
+            self.name = name
+            self.guard = guard
+
+        @routine
+        async def enter(self) -> str:
+            log.append(f"enter {self.name}")
+            if self.name == "second":
+                if failure == "registration":
+                    raise error
+                async with selectors(self.guard) as (selector,):
+                    assert selector is not None
+                    if failure == "result":
+                        selector.error(error)
+                    else:
+                        selector.result(42)
+            return "ignored entry value"
+
+        @routine
+        async def exit(self, *exc: object) -> bool:
+            assert exc == (None, None, None)
+            async with selectors(self.guard) as (selector,):
+                assert selector is None
+            log.append(f"exit {self.name}")
+            if self.name == "second" and failure == "cleanup":
+                raise error
+            # This must not suppress a different registration's exception.
+            return True
+
+        def __enter__(self) -> str:
+            return self.enter()
+
+        def __exit__(self, *exc: object) -> bool:
+            return self.exit(*exc)
+
+        async def __aenter__(self) -> str:
+            return await self.enter.a()
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return await self.exit.a(*exc)
+
+    class Choice:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        @contextmanager
+        async def __select__(self, guard: SelectorGuard[int]) -> AsyncIterator[str]:
+            async with Registration(self.name, guard) as value:
+                yield value
+
+    if failure == "none":
+        assert await select.a(Choice("first"), Choice("second")) == (1, 42)
+    else:
+        with pytest.raises(ValueError) as raised:
+            await select.a(Choice("first"), Choice("second"))
+        assert raised.value is error
+    assert log == ["enter first", "enter second"] + (
+        [] if failure == "registration" else ["exit second"]
+    ) + ["exit first"]
+
+
+def _check_registration_isolation(checkpoint: Callable[[], None]) -> None:
+    for failure in ("none", "registration", "result", "cleanup"):
+        exercise_registration_isolation(failure)
+    checkpoint()
+
+
+def test_ordinary_registration_isolation(sync_runtime: RunSync) -> None:
+    sync_runtime(_check_registration_isolation)
+
+
+@pytest.mark.parametrize("failure", ["none", "registration", "result", "cleanup"])
+def test_async_registration_isolation(
+    async_runtime: AsyncRuntime, failure: str
+) -> None:
+    async_runtime.run(lambda: exercise_registration_isolation.a(failure))
