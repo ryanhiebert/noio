@@ -7,6 +7,7 @@ import pytest
 from noio import CancelledError
 from noio import Event
 from noio import cancel
+from noio import cleared_mode
 from noio import routine
 from noio import sleep
 from noio._shield import shield
@@ -535,3 +536,66 @@ def test_ordinary_cancellation_exception(sync_runtime: RunSync) -> None:
 
 def test_async_cancellation_exception(async_runtime: AsyncRuntime) -> None:
     async_runtime.run(exercise_cancellation_exception.a)
+
+
+@routine
+async def exercise_explicit_cancellation() -> None:
+    ready = Event()
+    await ready.set.a()
+    async with cancel() as scope:
+        assert await scope.cancel.a() is None
+        assert await scope.cancel.a() is None
+        for _ in range(2):
+            with pytest.raises(CancelledError):
+                await ready.wait.a()
+        async with cancel(shield=True) as inner:
+            await ready.wait.a()
+            await inner.cancel.a()
+            with pytest.raises(CancelledError):
+                await ready.wait.a()
+    await ready.wait.a()
+
+
+def _check_explicit_cancellation(checkpoint: Callable[[], None]) -> None:
+    exercise_explicit_cancellation()
+    checkpoint()
+
+
+def test_explicit_cancellation_ordinary(sync_runtime: RunSync) -> None:
+    sync_runtime(_check_explicit_cancellation)
+
+
+def test_explicit_cancellation_async(async_runtime: AsyncRuntime) -> None:
+    async_runtime.run(exercise_explicit_cancellation.a)
+
+
+def test_explicit_cancellation_from_thread(async_runtime: AsyncRuntime) -> None:
+    from collections.abc import AsyncIterator
+
+    from noio import contextmanager
+    from noio.selectable import SelectorGuard
+    from noio.selectable import selectable
+
+    async def main() -> None:
+        pending = Event()
+        async with cancel() as scope:
+
+            @selectable
+            @contextmanager
+            async def trigger(guard: SelectorGuard[None]) -> AsyncIterator[None]:
+                # The first choice and the cancellation event are registered.
+                assert pending._waiters
+
+                @cleared_mode
+                def cancel_from_thread() -> None:
+                    with _open_task_group() as threads:
+                        threads.spawn(scope.cancel)
+
+                cancel_from_thread()
+                yield
+
+            with pytest.raises(CancelledError):
+                await select.a(pending.wait.select(), trigger.select())
+        assert not pending._waiters
+
+    async_runtime.run(main)

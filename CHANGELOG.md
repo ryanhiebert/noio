@@ -12,7 +12,7 @@ Unreleased
 
 - `noio.Event` for persistent completion.
 
-- `noio.cancel` for cancellation scopes with a shared timeout and shielding,
+- `noio.cancel` for cancellation scopes with explicit cancellation, a shared timeout, and shielding,
   and `noio.CancelledError` for cancellation delivered at IO.
 
 - `@noio.selectable.selectable` to make a function or method usable directly or as a selectable,

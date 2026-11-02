@@ -28,6 +28,19 @@ Zero cancels at the first selectable IO operation.
 Omitting `timeout`, or using positive infinity, sets no deadline.
 Negative durations and NaN are rejected.
 
+Use the scope's `cancel()` method to cancel explicitly:
+
+```python
+with noio.cancel() as scope:
+    scope.cancel()
+    # Subsequent selectable IO raises CancelledError.
+```
+
+Another worker can call `scope.cancel()` to interrupt waits in the scope.
+Repeated calls are harmless.
+In coroutine code, use `await scope.cancel.a()`.
+Explicit cancellation and timeout expiry have the same effect.
+
 Use `shield=True` to give recovery work an independent time budget:
 
 ```python

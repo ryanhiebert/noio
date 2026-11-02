@@ -14,6 +14,7 @@ from ._contextlib import contextmanager
 from ._runtime import current_runtime
 from ._timer import _timer
 from .event import Event
+from .routine import routine
 from .selectable import SelectorGuard
 
 
@@ -22,6 +23,11 @@ class _CancelScope:
         self.deadline = deadline
         self.clock = clock
         self.cancelled = Event()
+
+    @routine
+    async def cancel(self) -> None:
+        """Cancel this scope permanently; repeated calls are harmless."""
+        await self.cancelled.set.a()
 
     @contextmanager
     async def __select__(self, guard: SelectorGuard[None]) -> AsyncIterator[None]:
@@ -33,7 +39,9 @@ class _CancelScope:
 
 
 @contextmanager
-async def cancel(*, timeout: float = inf, shield: bool = False) -> AsyncIterator[None]:
+async def cancel(
+    *, timeout: float = inf, shield: bool = False
+) -> AsyncIterator[_CancelScope]:
     """Cancel selectable IO when the scope deadline expires."""
     if not timeout >= 0:
         raise ValueError("timeout must be non-negative and not NaN")
@@ -59,4 +67,4 @@ async def cancel(*, timeout: float = inf, shield: bool = False) -> AsyncIterator
         scope = _CancelScope(clock() + timeout, clock)
         async with _timer(max(0.0, scope.deadline - clock()), scope.cancelled.set):
             with enter_cancel_scope(scope):
-                yield
+                yield scope
