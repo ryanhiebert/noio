@@ -11,6 +11,7 @@ from typing import assert_type
 
 import pytest
 
+from noio import cancel
 from noio import routine
 from noio import sleep
 from noio._event import Event
@@ -96,19 +97,21 @@ async def _failures() -> None:
 
     @routine
     async def sibling() -> None:
-        await failed.wait.a()
-        await sleep.a(0)
-        calls.append("sibling")
-        raise second
+        async with cancel(shield=True):
+            await failed.wait.a()
+            await sleep.a(0)
+            calls.append("sibling")
+            raise second
 
     with pytest.raises(ExceptionGroup) as raised:
         async with _open_task_group() as group:
             await group.spawn.a(failing)
             await group.spawn.a(sibling)
-            await failed.wait.a()
-            await sleep.a(0)
-            calls.append("parent")
-            raise body
+            async with cancel(shield=True):
+                await failed.wait.a()
+                await sleep.a(0)
+                calls.append("parent")
+                raise body
     assert set(raised.value.exceptions) == {first, second, body}
     assert sorted(calls) == ["parent", "sibling"]
 
@@ -238,9 +241,11 @@ def test_external_cancellation_joins(
 
     @routine
     async def child() -> None:
-        await sleep.a(0)
-        await sleep.a(0)
-        finished.append(True)
+        try:
+            await sleep.a(0)
+            await sleep.a(0)
+        finally:
+            finished.append(True)
 
     async def body() -> None:
         async with _open_task_group() as group:
@@ -257,18 +262,33 @@ def test_external_cancellation_joins(
 
 def test_asyncio_child_cancelled_before_start() -> None:
     async def main() -> None:
+        entered = Event()
+        finished: list[bool] = []
+
+        @routine
+        async def sibling() -> None:
+            try:
+                entered.set()
+                await sleep.a(float("inf"))
+            finally:
+                finished.append(True)
+
         @routine
         async def child() -> None:
             pytest.fail("cancelled child must not start")
 
         with pytest.raises(BaseExceptionGroup) as raised:
             async with _open_task_group() as group:
+                await group.spawn.a(sibling)
+                await entered.wait.a()
                 await group.spawn.a(child)
-                task = group._children.items[0].handle
+                task = group._children.items[1].handle
                 assert isinstance(task, asyncio.Task)
                 task.cancel()
+                await sleep.a(float("inf"))
         assert len(raised.value.exceptions) == 1
         assert isinstance(raised.value.exceptions[0], asyncio.CancelledError)
+        assert finished == [True]
 
     asyncio.run(main())
 
@@ -407,3 +427,72 @@ def test_asyncio_launch_failure_closes_coroutine(
         assert calls == [True]
 
     asyncio.run(main())
+
+
+@routine
+async def _failure_cancels_group(body_fails: bool, cleanup_fails: bool = False) -> None:
+    from noio import Event as SelectableEvent
+
+    waiting = Event()
+    blocked = SelectableEvent()
+    finished: list[str] = []
+    failure = ValueError("group failure")
+    cleanup_failure = RuntimeError("cleanup failure")
+
+    @routine
+    async def sibling() -> None:
+        try:
+            waiting.set()
+            await blocked.wait.a()
+        finally:
+            finished.append("sibling")
+            if cleanup_fails:
+                raise cleanup_failure
+
+    @routine
+    async def failing() -> None:
+        await waiting.wait.a()
+        raise failure
+
+    async with cancel():
+        with pytest.raises((ValueError, ExceptionGroup)) as raised:
+            async with _open_task_group() as group:
+                await group.spawn.a(sibling)
+                await waiting.wait.a()
+                if body_fails:
+                    raise failure
+                await group.spawn.a(failing)
+                # A child failure must also interrupt the group body.
+                await sleep.a(float("inf"))
+        if isinstance(raised.value, ExceptionGroup):
+            assert set(raised.value.exceptions) == (
+                {failure, cleanup_failure} if cleanup_fails else {failure}
+            )
+        else:
+            assert raised.value is failure
+        assert finished == ["sibling"]
+        assert not blocked._waiters
+        # The group's failure must not cancel its enclosing scope.
+        await sleep.a(0)
+
+
+def _check_group_cancellation(checkpoint: Callable[[], None]) -> None:
+    _failure_cancels_group(False)
+    _failure_cancels_group(True)
+    _failure_cancels_group(False, True)
+    _failure_cancels_group(True, True)
+    checkpoint()
+
+
+def test_failure_cancels_group_ordinary(sync_runtime: RunSync) -> None:
+    sync_runtime(_check_group_cancellation)
+
+
+def test_failure_cancels_group_async(async_runtime: AsyncRuntime) -> None:
+    async def main() -> None:
+        await _failure_cancels_group.a(False)
+        await _failure_cancels_group.a(True)
+        await _failure_cancels_group.a(False, True)
+        await _failure_cancels_group.a(True, True)
+
+    async_runtime.run(main)

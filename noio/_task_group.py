@@ -3,8 +3,8 @@
 Completion means the worker function and its cleanup have finished.
 Children inherit cancellation scopes from group entry and other context variables
 from the spawning caller.
-There is deliberately no group cancellation policy yet. A child that does not
-finish prevents scope exit, including when the body or another child fails.
+A child or body failure cancels the group at noio selectable IO.
+Scope exit waits for all children, including their cleanup.
 """
 
 import asyncio
@@ -24,7 +24,10 @@ from aiologic.lowlevel import async_checkpoint
 from aiologic.lowlevel import current_async_library
 from aiologic.lowlevel import current_green_library
 
+from ._cancel import CancelledError
 from ._cancel import _CancellationContext
+from ._cancel import enter_cancel_scope
+from ._cancel_scope import _CancelScope
 from ._contextlib import contextmanager
 from ._event import Event
 from ._runtime import current_runtime
@@ -42,8 +45,10 @@ class _Child[F: Callable[..., Any]]:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         cancellation: _CancellationContext | None = None,
+        scope: _CancelScope | None = None,
     ) -> None:
         self._cancellation = cancellation or _CancellationContext()
+        self._scope = scope
         self.fn = fn
         self.args = args
         self.kwargs = kwargs
@@ -60,6 +65,8 @@ class _Child[F: Callable[..., Any]]:
                 await self.fn.a(*self.args, **self.kwargs)
         except BaseException as error:
             self.error = error
+            if self._scope is not None:
+                await self._scope.cancel.a()
 
     @run.fn
     def run(self: _Child[Callable[..., Any]]) -> None:
@@ -68,6 +75,8 @@ class _Child[F: Callable[..., Any]]:
                 self.fn(*self.args, **self.kwargs)
         except BaseException as error:
             self.error = error
+            if self._scope is not None:
+                self._scope.cancel()
 
     @routine
     async def wait(self) -> None:
@@ -75,7 +84,8 @@ class _Child[F: Callable[..., Any]]:
 
 
 class _Children[F: Callable[..., Any]]:
-    def __init__(self) -> None:
+    def __init__(self, scope: _CancelScope) -> None:
+        self._scope = scope
         self._cancellation = _CancellationContext()
         self._lock = threading.Lock()
         self.items: list[_Child[F]] = []
@@ -85,7 +95,7 @@ class _Children[F: Callable[..., Any]]:
     def register(
         self, fn: F, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> Iterator[_Child[F]]:
-        child = _Child(fn, args, kwargs, self._cancellation)
+        child = _Child(fn, args, kwargs, self._cancellation, self._scope)
         # No user code, runtime calls, or waits under this lock.
         with self._lock:
             if self._closed:
@@ -111,11 +121,11 @@ class _Children[F: Callable[..., Any]]:
                     return errors, interrupted
                 child = self.items[index]
             try:
-                await shield(child.wait).a()
+                await child.wait.a()
             except BaseException as error:
-                # Shielding defers cancellation until the child finishes.
-                # Wait for the remaining children before delivering it.
                 interrupted = interrupted or error
+                await self._scope.cancel.a()
+                await shield(child.wait).a()
             if child.error is not None:
                 errors.append(child.error)
             index += 1
@@ -127,17 +137,18 @@ class _ThreadTaskGroup:
 
     @classmethod
     @contextmanager
-    async def open(cls) -> AsyncIterator[Self]:
-        children = _Children[Callable[..., Any]]()
+    async def open(cls, scope: _CancelScope) -> AsyncIterator[Self]:
+        children = _Children[Callable[..., Any]](scope)
         group = cls(children)
         body_error: BaseException | None = None
         try:
             yield group
         except BaseException as error:
             body_error = error
+            await scope.cancel.a()
         finally:
             errors, interrupted = await children.wait.a()
-        await _report_errors.a(body_error, errors, interrupted)
+        await _report_errors.a(body_error, errors, interrupted, scope=scope)
 
     @routine
     async def spawn(  # pyright: ignore[reportRedeclaration]
@@ -189,17 +200,18 @@ class _GeventTaskGroup:
 
     @classmethod
     @contextmanager
-    async def open(cls) -> AsyncIterator[Self]:
-        children = _Children[Callable[..., Any]]()
+    async def open(cls, scope: _CancelScope) -> AsyncIterator[Self]:
+        children = _Children[Callable[..., Any]](scope)
         group = cls(children)
         body_error: BaseException | None = None
         try:
             yield group
         except BaseException as error:
             body_error = error
+            await scope.cancel.a()
         finally:
             errors, interrupted = await children.wait.a()
-        await _report_errors.a(body_error, errors, interrupted)
+        await _report_errors.a(body_error, errors, interrupted, scope=scope)
 
     @routine
     async def spawn(  # pyright: ignore[reportRedeclaration]
@@ -246,17 +258,20 @@ class _AsyncioTaskGroup:
 
     @classmethod
     @contextmanager
-    async def open(cls) -> AsyncIterator[Self]:
-        children = _Children[Routine[..., Any]]()
+    async def open(cls, scope: _CancelScope) -> AsyncIterator[Self]:
+        children = _Children[Routine[..., Any]](scope)
         group = cls(children)
         body_error: BaseException | None = None
         try:
             yield group
         except BaseException as error:
             body_error = error
+            await scope.cancel.a()
         finally:
             errors, interrupted = await children.wait.a()
-        await _report_errors.a(body_error, errors, interrupted, checkpoint=True)
+        await _report_errors.a(
+            body_error, errors, interrupted, scope=scope, checkpoint=True
+        )
 
     @routine
     async def spawn(  # pyright: ignore[reportRedeclaration]
@@ -289,12 +304,23 @@ class _AsyncioTaskGroup:
                 raise
             child.handle = task
 
+            scope_cancel = self._children._scope.cancel
+
             def finished(task: asyncio.Task[None]) -> None:
                 try:
                     task.result()
                 except BaseException as error:
                     child.error = error
-                child.done.set()
+
+                    async def cancel_group() -> None:
+                        try:
+                            await scope_cancel.a()
+                        finally:
+                            child.done.set()
+
+                    child.handle = self._loop.create_task(cancel_group())
+                else:
+                    child.done.set()
 
             task.add_done_callback(finished)
 
@@ -330,22 +356,25 @@ class _TrioTaskGroup:
 
     @classmethod
     @contextmanager
-    async def open(cls) -> AsyncIterator[Self]:
+    async def open(cls, scope: _CancelScope) -> AsyncIterator[Self]:
         import trio
 
         body_error: BaseException | None = None
         async with trio.open_nursery() as nursery:
-            children = _Children[Routine[..., Any]]()
+            children = _Children[Routine[..., Any]](scope)
             group = cls(children, nursery)
             try:
                 yield group
             except BaseException as error:
                 body_error = error
+                await scope.cancel.a()
             finally:
                 nursery.cancel_scope.shield = True
                 errors, interrupted = await children.wait.a()
         # Report after leaving the nursery so it does not regroup our failures.
-        await _report_errors.a(body_error, errors, interrupted, checkpoint=True)
+        await _report_errors.a(
+            body_error, errors, interrupted, scope=scope, checkpoint=True
+        )
 
     @routine
     async def spawn(  # pyright: ignore[reportRedeclaration]
@@ -374,7 +403,8 @@ class _TrioTaskGroup:
         with self._children.register(fn, args, kwargs) as child:
 
             async def run() -> None:
-                # Parent cancellation does not abandon or cancel owned work.
+                # Native cancellation must not abandon owned work.
+                # noio cancellation is delivered through the captured scopes.
                 with trio.CancelScope(shield=True):
                     try:
                         await child.run.a()
@@ -403,8 +433,22 @@ async def _report_errors(
     errors: list[BaseException],
     interrupted: BaseException | None,
     *,
+    scope: _CancelScope,
     checkpoint: bool = False,
 ) -> None:
+    def remaining(error: BaseException | None) -> BaseException | None:
+        if isinstance(error, BaseExceptionGroup):
+            _, rest = error.split(
+                lambda item: isinstance(item, CancelledError) and item._scope is scope
+            )
+            return rest
+        if isinstance(error, CancelledError) and error._scope is scope:
+            return None
+        return error
+
+    body_error = remaining(body_error)
+    interrupted = remaining(interrupted)
+    errors = [rest for error in errors if (rest := remaining(error)) is not None]
     if body_error is None:
         body_error = interrupted
     elif interrupted is not None and type(interrupted) is not type(body_error):
@@ -428,17 +472,19 @@ async def _open_task_group() -> AsyncIterator[
     _ThreadTaskGroup | _GeventTaskGroup | _AsyncioTaskGroup | _TrioTaskGroup
 ]:
     """Choose execution at entry and wait for children, including their additions."""
-    match await current_runtime.a():
-        case "threading":
-            scope = _ThreadTaskGroup.open()
-        case "gevent":
-            scope = _GeventTaskGroup.open()
-        case "asyncio":
-            scope = _AsyncioTaskGroup.open()
-        case "trio":
-            scope = _TrioTaskGroup.open()
-        case library:
-            raise RuntimeError(f"Unsupported task group runtime: {library}")
+    cancellation = _CancelScope()
+    with enter_cancel_scope(cancellation):
+        match await current_runtime.a():
+            case "threading":
+                scope = _ThreadTaskGroup.open(cancellation)
+            case "gevent":
+                scope = _GeventTaskGroup.open(cancellation)
+            case "asyncio":
+                scope = _AsyncioTaskGroup.open(cancellation)
+            case "trio":
+                scope = _TrioTaskGroup.open(cancellation)
+            case library:
+                raise RuntimeError(f"Unsupported task group runtime: {library}")
 
-    async with scope as group:
-        yield group
+        async with scope as group:
+            yield group
