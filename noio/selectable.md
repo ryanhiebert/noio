@@ -128,7 +128,6 @@ It may leave the context without calling either method and try again later.
 The guard remains usable for another attempt,
 but each acquired selector is valid only inside the context that yielded it
 and in the task, thread, or greenlet that entered that context.
-Completing a selector twice or using it after context exit raises `RuntimeError`.
 
 If the selectable protects a resource with a lock,
 acquire that lock before entering `selectors()`.
@@ -177,8 +176,8 @@ Completion takes effect immediately, including notification of the consumer.
 Consumers wait for the selection locks to be released before reading their outcomes.
 If an implementation completes one participant and then raises,
 that participant remains completed; there is no rollback.
-Context exit releases the locks and ends the temporary selectors' lifetimes,
-even after an exception or cancellation.
+Context exit releases the locks, even after an exception or cancellation.
+Do not use the acquired selectors after exiting.
 
 Locking and collisions
 ----------------------

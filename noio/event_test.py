@@ -12,7 +12,8 @@ from noio import Event
 from noio import contextmanager
 from noio import routine
 from noio._lock import Lock
-from noio._selection import _Selection
+from noio.select import _Selection
+from noio.select import _Selector
 from noio.select import select
 from noio.selectable import SelectorGuard
 from noio.selectable import selectable
@@ -173,7 +174,9 @@ def test_cancel_partial_registration(backend: str, blocked_on: str) -> None:
         async def register() -> None:
             with scope:
                 await (
-                    event.wait.select().__select__(SelectorGuard(state, 0)).__aenter__()
+                    event.wait.select()
+                    .__select__(SelectorGuard(_Selector(state, 0), state._lock))
+                    .__aenter__()
                 )
                 pytest.fail("cancelled registration completed")
 
@@ -198,7 +201,9 @@ def test_registration_holds_event_lock_until_visible_to_set(backend: str) -> Non
         finished = anyio.Event()
 
         async def register() -> None:
-            cleanup = event.wait.select().__select__(SelectorGuard(state, 0))
+            cleanup = event.wait.select().__select__(
+                SelectorGuard(_Selector(state, 0), state._lock)
+            )
             await cleanup.__aenter__()
             cleanups.append(cleanup)
 
@@ -231,7 +236,9 @@ def test_partial_notification_survives_cancellation_and_competing_operations(
         first, second = _Selection[None](), _Selection[None]()
         registrations = []
         for state in (first, second):
-            registration = event.wait.select().__select__(SelectorGuard(state, 0))
+            registration = event.wait.select().__select__(
+                SelectorGuard(_Selector(state, 0), state._lock)
+            )
             await registration.__aenter__()
             registrations.append(registration)
         scope = anyio.CancelScope()
@@ -306,8 +313,6 @@ def _check_green_notification(checkpoint: Callable[[], None]) -> None:
 
     event = Event()
     state = _Selection[None]()
-    cleanup = event.wait.select().__select__(SelectorGuard(state, 0))
-    cleanup.__enter__()
     attempted = GreenEvent()
 
     class ObservedLock(Lock):
@@ -316,7 +321,12 @@ def _check_green_notification(checkpoint: Callable[[], None]) -> None:
             return await super().__aenter__()
 
     state._lock = ObservedLock()
+    cleanup = event.wait.select().__select__(
+        SelectorGuard(_Selector(state, 0), state._lock)
+    )
+    cleanup.__enter__()
     with state._lock:
+        attempted.clear()
         setter = gevent.spawn(event.set)
         assert attempted.wait(timeout=2)
         assert event._is_set
@@ -437,12 +447,14 @@ def test_repeated_asyncio_cancellation_during_shielded_work(operation: str) -> N
                 return await super().__aenter__()
 
         state = _Selection[None]()
-        cleanup = event.wait.select().__select__(SelectorGuard(state, 0))
-        await cleanup.__aenter__()
         lock = ObservedLock()
         if operation == "set":
             state._lock = lock
-        else:
+        cleanup = event.wait.select().__select__(
+            SelectorGuard(_Selector(state, 0), state._lock)
+        )
+        await cleanup.__aenter__()
+        if operation != "set":
             event._lock = lock
 
         async def worker() -> None:
@@ -481,7 +493,9 @@ def test_two_events_compete_for_one_selection(backend: str) -> None:
         state = _Selection[None]()
         registrations = []
         for index, event in enumerate((first, second)):
-            registration = event.wait.select().__select__(SelectorGuard(state, index))
+            registration = event.wait.select().__select__(
+                SelectorGuard(_Selector(state, index), state._lock)
+            )
             await registration.__aenter__()
             registrations.append(registration)
         async with anyio.create_task_group() as group, state._lock:

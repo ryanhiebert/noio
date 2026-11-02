@@ -14,7 +14,8 @@ import pytest
 from noio import contextmanager
 from noio import routine
 from noio._lock import Lock
-from noio._selection import _Selection
+from noio.select import _Selection
+from noio.select import _Selector
 from noio.select import select
 from noio.selectable import SelectionCollisionError
 from noio.selectable import Selector
@@ -29,8 +30,8 @@ from .conftest import RunSync
 async def exercise_selectors(checkpoint: Callable[[], Awaitable[None]]) -> None:
     left = _Selection[str]()
     right = _Selection[int]()
-    left_guard = SelectorGuard(left, 2)
-    right_guard = SelectorGuard(right, 7)
+    left_guard = SelectorGuard(_Selector(left, 2), left._lock)
+    right_guard = SelectorGuard(_Selector(right, 7), right._lock)
     async with selectors() as empty:
         assert empty == ()
     async with selectors(left_guard, right_guard) as (a, b):
@@ -42,23 +43,26 @@ async def exercise_selectors(checkpoint: Callable[[], Awaitable[None]]) -> None:
         b.result(42)
         with pytest.raises(RuntimeError, match="no longer pending"):
             a.result("again")
-    with pytest.raises(RuntimeError, match="outside"):
-        a.result("escaped")
-    with pytest.raises(RuntimeError, match="outside"):
-        b.error(ValueError())
     assert await left.wait.a() == (2, "received")
     assert await right.wait.a() == (7, 42)
-    async with selectors(SelectorGuard(left, 9), right_guard) as pair:
+    async with selectors(
+        SelectorGuard(_Selector(left, 9), left._lock), right_guard
+    ) as pair:
         assert pair == (None, None)
     # Closing a completed selection preserves its outcome.
     await left.invalidate.a()
     assert await left.wait.a() == (2, "received")
 
     pending = _Selection[None]()
-    async with selectors(left_guard, SelectorGuard(pending, 0)) as (a, c):
+    async with selectors(
+        left_guard, SelectorGuard(_Selector(pending, 0), pending._lock)
+    ) as (
+        a,
+        c,
+    ):
         assert a is None and c is not None
     # Exiting without completion does not retire the choice.
-    async with selectors(SelectorGuard(pending, 1)) as (c,):
+    async with selectors(SelectorGuard(_Selector(pending, 1), pending._lock)) as (c,):
         assert c is not None
         c.result(None)
     assert await pending.wait.a() == (1, None)
@@ -66,7 +70,10 @@ async def exercise_selectors(checkpoint: Callable[[], Awaitable[None]]) -> None:
     error = ValueError("delivered")
     failed = _Selection[str]()
     value = _Selection[Exception]()
-    async with selectors(SelectorGuard(failed, 0), SelectorGuard(value, 0)) as (a, d):
+    async with selectors(
+        SelectorGuard(_Selector(failed, 0), failed._lock),
+        SelectorGuard(_Selector(value, 0), value._lock),
+    ) as (a, d):
         assert a is not None and d is not None
         a.error(error)
         d.result(error)
@@ -78,13 +85,13 @@ async def exercise_selectors(checkpoint: Callable[[], Awaitable[None]]) -> None:
     inactive = _Selection[str]()
     await inactive.invalidate.a()
     await inactive.invalidate.a()
-    async with selectors(SelectorGuard(inactive, 0)) as (a,):
+    async with selectors(SelectorGuard(_Selector(inactive, 0), inactive._lock)) as (a,):
         assert a is None
 
     for state in (inactive, _Selection[str]()):
         # Both distinct guards and a repeated identical guard must fail.
-        guard = SelectorGuard(state, 0)
-        for other in (guard, SelectorGuard(state, 1)):
+        guard = SelectorGuard(_Selector(state, 0), state._lock)
+        for other in (guard, SelectorGuard(_Selector(state, 1), state._lock)):
             with pytest.raises(SelectionCollisionError, match="collide"):
                 async with selectors(guard, other):
                     pytest.fail("colliding guards entered")
@@ -95,7 +102,10 @@ async def exercise_selectors(checkpoint: Callable[[], Awaitable[None]]) -> None:
     first, second = _Selection[int](), _Selection[int]()
     y: Selector[int] | None = None
     with pytest.raises(ValueError, match="selectable bug"):
-        async with selectors(SelectorGuard(first, 0), SelectorGuard(second, 0)) as (
+        async with selectors(
+            SelectorGuard(_Selector(first, 0), first._lock),
+            SelectorGuard(_Selector(second, 0), second._lock),
+        ) as (
             x,
             y,
         ):
@@ -103,10 +113,8 @@ async def exercise_selectors(checkpoint: Callable[[], Awaitable[None]]) -> None:
             x.result(1)
             raise ValueError("selectable bug")
     assert y is not None
-    with pytest.raises(RuntimeError, match="outside"):
-        y.result(2)
     assert await first.wait.a() == (0, 1)
-    async with selectors(SelectorGuard(second, 0)) as (y,):
+    async with selectors(SelectorGuard(_Selector(second, 0), second._lock)) as (y,):
         assert y is not None
         y.result(2)
     assert await second.wait.a() == (0, 2)
@@ -118,7 +126,7 @@ def _check_sync(checkpoint: Callable[[], None]) -> None:
 
     exercise_selectors(green_checkpoint)
     state = _Selection[int]()
-    with selectors(SelectorGuard(state, 0)) as (selector,):
+    with selectors(SelectorGuard(_Selector(state, 0), state._lock)) as (selector,):
         assert selector is not None
         selector.result(1)
     assert state.wait() == (0, 1)
@@ -159,7 +167,10 @@ def test_competing_matches_in_opposite_order(async_runtime: AsyncRuntime) -> Non
         first._lock, second._lock = first_lock, second_lock
 
         async def owner() -> None:
-            async with selectors(SelectorGuard(first, 0), SelectorGuard(second, 0)) as (
+            async with selectors(
+                SelectorGuard(_Selector(first, 0), first._lock),
+                SelectorGuard(_Selector(second, 0), second._lock),
+            ) as (
                 a,
                 b,
             ):
@@ -171,7 +182,8 @@ def test_competing_matches_in_opposite_order(async_runtime: AsyncRuntime) -> Non
         async def contender() -> None:
             await paused.wait()
             async with selectors(
-                SelectorGuard(second, 1), SelectorGuard(first, 1)
+                SelectorGuard(_Selector(second, 1), second._lock),
+                SelectorGuard(_Selector(first, 1), first._lock),
             ) as pair:
                 assert pair == (None, None)
                 completed.append("contender")
@@ -203,7 +215,10 @@ def test_cancellation_during_partial_acquisition(backend: str) -> None:
 
         async def contender() -> None:
             with scope:
-                async with selectors(SelectorGuard(second, 0), SelectorGuard(first, 0)):
+                async with selectors(
+                    SelectorGuard(_Selector(second, 0), second._lock),
+                    SelectorGuard(_Selector(first, 0), first._lock),
+                ):
                     pytest.fail("second lock is held")
             finished.set()
 
@@ -217,23 +232,26 @@ def test_cancellation_during_partial_acquisition(backend: str) -> None:
             # Partial acquisition released the first lock.
             async with first._lock:
                 pass
-        async with selectors(SelectorGuard(first, 0), SelectorGuard(second, 0)) as (
+        async with selectors(
+            SelectorGuard(_Selector(first, 0), first._lock),
+            SelectorGuard(_Selector(second, 0), second._lock),
+        ) as (
             a,
             b,
         ):
             assert a is not None and b is not None
 
         with anyio.CancelScope() as scope:
-            async with selectors(SelectorGuard(first, 0)) as (a,):
+            async with selectors(SelectorGuard(_Selector(first, 0), first._lock)) as (
+                a,
+            ):
                 assert a is not None
                 scope.cancel()
                 await anyio.lowlevel.checkpoint()
         assert a is not None
-        with pytest.raises(RuntimeError, match="outside"):
-            a.result(1)
         # The guard context is not the selection lifecycle owner.
         await first.invalidate.a()
-        async with selectors(SelectorGuard(first, 0)) as (a,):
+        async with selectors(SelectorGuard(_Selector(first, 0), first._lock)) as (a,):
             assert a is None
 
     anyio.run(main, backend=backend)
@@ -242,7 +260,10 @@ def test_cancellation_during_partial_acquisition(backend: str) -> None:
 def test_many_guards_preserve_argument_order() -> None:
     states = [_Selection[int]() for _ in range(5)]
     states[2].invalidate()
-    guards = [SelectorGuard(state, index) for index, state in enumerate(states)]
+    guards = [
+        SelectorGuard(_Selector(state, index), state._lock)
+        for index, state in enumerate(states)
+    ]
     with selectors(*reversed(guards)) as acquired:
         assert len(acquired) == 5
         for index, selector in zip(reversed(range(5)), acquired, strict=True):
@@ -264,7 +285,10 @@ def _check_green_cancellation(checkpoint: Callable[[], None]) -> None:
     leaked: list[Selector[int]] = []
 
     def partial() -> None:
-        with selectors(SelectorGuard(second, 0), SelectorGuard(first, 0)):
+        with selectors(
+            SelectorGuard(_Selector(second, 0), second._lock),
+            SelectorGuard(_Selector(first, 0), first._lock),
+        ):
             pytest.fail("second lock is held")
 
     with second._lock:
@@ -276,7 +300,10 @@ def _check_green_cancellation(checkpoint: Callable[[], None]) -> None:
             pass
 
     def holding() -> None:
-        with selectors(SelectorGuard(first, 0), SelectorGuard(second, 0)) as (a, b):
+        with selectors(
+            SelectorGuard(_Selector(first, 0), first._lock),
+            SelectorGuard(_Selector(second, 0), second._lock),
+        ) as (a, b):
             assert a is not None and b is not None
             leaked.extend((a, b))
             gevent.sleep(10)
@@ -285,10 +312,10 @@ def _check_green_cancellation(checkpoint: Callable[[], None]) -> None:
     checkpoint()
     task.kill()
     assert len(leaked) == 2
-    for selector in leaked:
-        with pytest.raises(RuntimeError, match="outside"):
-            selector.result(1)
-    with selectors(SelectorGuard(first, 1), SelectorGuard(second, 1)) as (a, b):
+    with selectors(
+        SelectorGuard(_Selector(first, 1), first._lock),
+        SelectorGuard(_Selector(second, 1), second._lock),
+    ) as (a, b):
         assert a is not None and b is not None
         a.result(2)
         b.result(3)

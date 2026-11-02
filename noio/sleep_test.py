@@ -10,6 +10,7 @@ from aiologic.lowlevel import current_green_library
 
 import noio
 from noio import contextmanager
+from noio.select import _Selector
 
 from .conftest import AsyncRuntime
 from .conftest import RunSync
@@ -263,13 +264,13 @@ async def _timer_loses_while_waiting_for_selection_lock() -> None:
 
     from ._contextlib import contextmanager
     from ._event import Event
-    from ._selection import _Selection
+    from .select import _Selection
     from .selectable import SelectorGuard
     from .selectable import selectors
 
     attempting = Event()
     selection = _Selection[None]()
-    guard = SelectorGuard(selection, 0)
+    guard = SelectorGuard(_Selector(selection, 0), selection._lock)
 
     @contextmanager
     async def observed_selectors(guard: SelectorGuard[None]):

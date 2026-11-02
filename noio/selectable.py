@@ -27,7 +27,8 @@ from ._contextlib import ContextManager
 from ._contextlib import _ContextManagerFactory
 from ._contextlib import contextmanager
 from ._lock import acquire
-from ._selection import SelectorGuard as SelectorGuard
+from ._selector import Selector as Selector
+from ._selector import SelectorGuard as SelectorGuard
 from .routine import Routine
 from .routine import routine
 from .select import select
@@ -43,33 +44,6 @@ __all__ = [
 
 class SelectionCollisionError(ValueError):
     """Raised when acquiring multiple guards belonging to one selection."""
-
-
-class Selector[T]:
-    """Permission to complete a choice, used only inside its acquiring context."""
-
-    def __init__(self, guard: SelectorGuard[T]) -> None:
-        self._guard = guard
-        self._active = True
-
-    def result(self, value: T, /) -> None:
-        """Complete with a value, notifying the waiter immediately.
-
-        Raises RuntimeError after completion or outside the acquiring context.
-        Exception objects passed here are ordinary result values.
-        """
-        if not self._active:
-            raise RuntimeError("Selector is outside its acquiring context")
-        self._guard._selection.result(self._guard._index, value)
-
-    def error(self, error: Exception, /) -> None:
-        """Complete with an exception to raise in the waiting selection.
-
-        Raises RuntimeError after completion or outside the acquiring context.
-        """
-        if not self._active:
-            raise RuntimeError("Selector is outside its acquiring context")
-        self._guard._selection.error(self._guard._index, error)
 
 
 @overload
@@ -118,19 +92,12 @@ async def selectors(
     Setters record and notify immediately; callers coordinate multi-party
     completion without intervening awaits or other fallible work.
     """
-    states = [guard._selection for guard in guards]
-    if len({id(state) for state in states}) != len(states):
+    if len({id(guard.lock) for guard in guards}) != len(guards):
         raise SelectionCollisionError("Guards from the same selection collide")
-    async with acquire(state._lock for state in states):
-        acquired = tuple(
-            Selector(guard) if guard._selection._pending else None for guard in guards
+    async with acquire(guard.lock for guard in guards):
+        yield tuple(
+            guard.selector if guard.selector.pending() else None for guard in guards
         )
-        try:
-            yield acquired
-        finally:
-            for selector in acquired:
-                if selector is not None:
-                    selector._active = False
 
 
 class _Operation[T]:

@@ -1,41 +1,95 @@
 """Select one outcome from operations registered in the supplied order."""
 
-from collections.abc import AsyncIterator
-from contextlib import AbstractContextManager
 from contextlib import AsyncExitStack
 from contextlib import ExitStack
 from typing import Any
 from typing import Literal
-from typing import Protocol
 from typing import cast
 from typing import overload
 
 from ._contextlib import ContextManager
-from ._contextlib import contextmanager
-from ._selection import SelectorGuard
-from ._selection import _Selection
+from ._event import Event
+from ._lock import Lock
+from ._selector import Selectable as Selectable
+from ._selector import SelectorGuard
+from ._selector import _RoutineSelectable
 from .routine import Routine
-from .routine import cleared_mode
+from .routine import routine
+from .shield import shield
 
 __all__ = ["Selectable", "select"]
 
 
-class _Selectable[T](Protocol):
-    def __select__(self, guard: SelectorGuard[T], /) -> AbstractContextManager[Any]: ...
+class _Selection[T]:
+    """Shared state for choices in one select call."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._pending = True
+        self._event = Event()
+        # An index is recorded only on completion, not on invalidation.
+        self._index: int | None = None
+        self._value: T | None = None
+        self._error: Exception | None = None
+
+    def result(self, index: int, value: T) -> None:
+        """Record a value while the caller holds _lock."""
+        if not self._pending:
+            raise RuntimeError("Selection is no longer pending")
+        self._value = value
+        self._index = index
+        self._pending = False
+        self._event.set()
+
+    def error(self, index: int, error: Exception) -> None:
+        """Record an exception while the caller holds _lock."""
+        if not self._pending:
+            raise RuntimeError("Selection is no longer pending")
+        self._error = error
+        self._index = index
+        self._pending = False
+        self._event.set()
+
+    @shield
+    @routine
+    async def invalidate(self) -> None:
+        """Make every choice ineligible, preserving any committed outcome.
+
+        It does not notify waiters: invalidation is not an outcome.
+        """
+        async with self._lock:
+            self._pending = False
+
+    @routine
+    async def wait(self) -> tuple[int, T]:
+        await self._event.wait.a()
+        # Notification may arrive while a selectable is still completing other
+        # participants. Do not expose the outcome until its locks are released.
+        async with self._lock:
+            assert self._index is not None
+            index = self._index
+            value = self._value
+            error = self._error
+        if error is not None:
+            raise error
+        return index, cast(T, value)
 
 
-class _RoutineSelectable[T](Protocol):
-    @contextmanager
-    async def __select__(self, guard: SelectorGuard[T], /) -> AsyncIterator[Any]:
-        yield
+class _Selector[T]:
+    """Bind an outcome index without exposing it through the shared contract."""
 
+    def __init__(self, selection: _Selection[T], index: int) -> None:
+        self._selection = selection
+        self._index = index
 
-class _ClearedSelectable[T](Protocol):
-    @cleared_mode
-    def __select__(self, guard: SelectorGuard[T], /) -> Any: ...
+    def pending(self) -> bool:
+        return self._selection._pending
 
+    def result(self, value: T, /) -> None:
+        self._selection.result(self._index, value)
 
-type Selectable[T] = _Selectable[T] | _RoutineSelectable[T] | _ClearedSelectable[T]
+    def error(self, error: Exception, /) -> None:
+        self._selection.error(self._index, error)
 
 
 async def _select_async[T](*choices: _RoutineSelectable[T]) -> tuple[int, T]:
@@ -46,7 +100,9 @@ async def _select_async[T](*choices: _RoutineSelectable[T]) -> tuple[int, T]:
     async with AsyncExitStack() as cleanups:
         try:
             registrations = [
-                choice.__select__(SelectorGuard(selection, index))
+                choice.__select__(
+                    SelectorGuard(_Selector(selection, index), selection._lock)
+                )
                 for index, choice in enumerate(choices)
             ]
             if any(
@@ -71,7 +127,9 @@ def _select_fn[T](*choices: Selectable[T]) -> tuple[int, T]:
     with ExitStack() as cleanups:
         try:
             for index, choice in enumerate(choices):
-                registration = choice.__select__(SelectorGuard(selection, index))
+                registration = choice.__select__(
+                    SelectorGuard(_Selector(selection, index), selection._lock)
+                )
                 registration.__enter__()
                 cleanups.callback(registration.__exit__, None, None, None)
             return selection.wait()
