@@ -21,6 +21,8 @@ Then it wins, with no race against later selectables.
 `select` is a [routine](routine.md),
 so it can be used as `await select.a(first, second)`.
 
+Enclosing [cancellation scopes](cancel.md) also apply to selection.
+
 See [implementing selectables](selectable.md) for the selectable interface
 and its registration and cleanup contract.
 

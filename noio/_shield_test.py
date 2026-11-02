@@ -8,8 +8,8 @@ from typing import assert_type
 import pytest
 
 from noio import routine
-from noio import shield
 from noio._event import Event
+from noio._shield import shield
 from noio.routine import Routine
 from noio.routine import _mode
 

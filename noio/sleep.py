@@ -8,6 +8,9 @@ from aiologic.lowlevel import green_sleep
 
 from ._contextlib import contextmanager
 from ._timer import _timer
+from .routine import _Mode
+from .routine import _mode
+from .routine import cleared_mode
 from .routine import routine
 from .selectable import SelectorGuard
 from .selectable import selectable
@@ -33,7 +36,10 @@ async def sleep(  # pyright: ignore[reportRedeclaration]
                 selector.result(None)
 
     if seconds == 0:
-        await sleep.a(0)
+        if _mode.get() is _Mode.DRIVEN:
+            cleared_mode(green_sleep)(0)
+        else:
+            await async_sleep(0)
         await complete.a()
         yield
         return

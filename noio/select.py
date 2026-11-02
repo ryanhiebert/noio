@@ -7,15 +7,17 @@ from typing import Literal
 from typing import cast
 from typing import overload
 
+from ._cancel import CancelledError
+from ._cancel import current_cancellations
 from ._contextlib import ContextManager
 from ._event import Event
 from ._lock import Lock
 from ._selector import Selectable as Selectable
 from ._selector import SelectorGuard
 from ._selector import _RoutineSelectable
+from ._shield import shield
 from .routine import Routine
 from .routine import routine
-from .shield import shield
 
 __all__ = ["Selectable", "select"]
 
@@ -97,6 +99,7 @@ async def _select_async[T](*choices: _RoutineSelectable[T]) -> tuple[int, T]:
     if not choices:
         raise ValueError("select requires at least one selectable")
     selection = _Selection[T]()
+    scopes = current_cancellations()
     async with AsyncExitStack() as cleanups:
         try:
             registrations = [
@@ -112,10 +115,19 @@ async def _select_async[T](*choices: _RoutineSelectable[T]) -> tuple[int, T]:
                 raise TypeError(
                     "Asynchronous selection requires routine-based context managers"
                 )
+            for index, scope in enumerate(scopes):
+                registration = scope.__select__(
+                    SelectorGuard(_Selector(selection, -index - 1), selection._lock)
+                )
+                await registration.__aenter__()
+                cleanups.push_async_callback(registration.__aexit__, None, None, None)
             for registration in registrations:
                 await registration.__aenter__()
                 cleanups.push_async_callback(registration.__aexit__, None, None, None)
-            return await selection.wait.a()
+            result = await selection.wait.a()
+            if result[0] < 0:
+                raise CancelledError(scopes[-result[0] - 1])
+            return result
         finally:
             await selection.invalidate.a()
 
@@ -124,15 +136,25 @@ def _select_fn[T](*choices: Selectable[T]) -> tuple[int, T]:
     if not choices:
         raise ValueError("select requires at least one selectable")
     selection = _Selection[T]()
+    scopes = current_cancellations()
     with ExitStack() as cleanups:
         try:
+            for index, scope in enumerate(scopes):
+                registration = scope.__select__(
+                    SelectorGuard(_Selector(selection, -index - 1), selection._lock)
+                )
+                registration.__enter__()
+                cleanups.callback(registration.__exit__, None, None, None)
             for index, choice in enumerate(choices):
                 registration = choice.__select__(
                     SelectorGuard(_Selector(selection, index), selection._lock)
                 )
                 registration.__enter__()
                 cleanups.callback(registration.__exit__, None, None, None)
-            return selection.wait()
+            result = selection.wait()
+            if result[0] < 0:
+                raise CancelledError(scopes[-result[0] - 1])
+            return result
         finally:
             selection.invalidate()
 

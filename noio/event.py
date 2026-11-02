@@ -4,11 +4,11 @@ from collections.abc import AsyncIterator
 
 from ._contextlib import contextmanager
 from ._lock import Lock
+from ._shield import shield
 from .routine import routine
 from .selectable import SelectorGuard
 from .selectable import selectable
 from .selectable import selectors
-from .shield import shield
 
 __all__ = ["Event"]
 

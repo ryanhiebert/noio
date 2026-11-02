@@ -12,7 +12,8 @@ Unreleased
 
 - `noio.Event` for persistent completion.
 
-- `noio.shield` to shield routines and other callables from cancellation.
+- `noio.cancel` for cancellation scopes with a shared timeout and shielding,
+  and `noio.CancelledError` for cancellation delivered at IO.
 
 - `@noio.selectable.selectable` to make a function or method usable directly or as a selectable,
   with context-manager registrations and custom direct-call implementations.

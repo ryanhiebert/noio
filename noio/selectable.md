@@ -90,10 +90,13 @@ It does not receive selection errors, cancellation, or another registration's er
 Entry values and exit return values are ignored.
 An exit error propagates, but does not prevent the remaining contexts from exiting.
 
-Runtime cancellation propagates even if a choice has already completed.
+Cancellation, including enclosing noio scopes at selectable IO,
+can interrupt registration and cleanup even if a choice has already completed.
 Completion is not undone, but the caller does not receive its result.
 Invalidating the guards is protected from cancellation;
 context exits run in the caller's context and handle their own cancellation needs.
+Shield required post-commit cleanup when cancellation there would prevent safe delivery
+of the result; see [cancellation scopes](cancel.md) for native shielding limitations.
 
 Completing a choice
 -------------------

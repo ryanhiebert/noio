@@ -1,6 +1,8 @@
 """Owned child execution; errors are reported after every child finishes.
 
 Completion means the worker function and its cleanup have finished.
+Children inherit cancellation scopes from group entry and other context variables
+from the spawning caller.
 There is deliberately no group cancellation policy yet. A child that does not
 finish prevents scope exit, including when the body or another child fails.
 """
@@ -22,14 +24,15 @@ from aiologic.lowlevel import async_checkpoint
 from aiologic.lowlevel import current_async_library
 from aiologic.lowlevel import current_green_library
 
+from ._cancel import _CancellationContext
 from ._contextlib import contextmanager
 from ._event import Event
 from ._runtime import current_runtime
+from ._shield import shield
 from .routine import Routine
 from .routine import _Mode
 from .routine import _mode
 from .routine import routine
-from .shield import shield
 
 
 class _Child[F: Callable[..., Any]]:
@@ -38,7 +41,9 @@ class _Child[F: Callable[..., Any]]:
         fn: F,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
+        cancellation: _CancellationContext | None = None,
     ) -> None:
+        self._cancellation = cancellation or _CancellationContext()
         self.fn = fn
         self.args = args
         self.kwargs = kwargs
@@ -51,14 +56,16 @@ class _Child[F: Callable[..., Any]]:
         self: _Child[Routine[..., Any]],
     ) -> None:
         try:
-            await self.fn.a(*self.args, **self.kwargs)
+            with self._cancellation.enter():
+                await self.fn.a(*self.args, **self.kwargs)
         except BaseException as error:
             self.error = error
 
     @run.fn
     def run(self: _Child[Callable[..., Any]]) -> None:
         try:
-            self.fn(*self.args, **self.kwargs)
+            with self._cancellation.enter():
+                self.fn(*self.args, **self.kwargs)
         except BaseException as error:
             self.error = error
 
@@ -69,6 +76,7 @@ class _Child[F: Callable[..., Any]]:
 
 class _Children[F: Callable[..., Any]]:
     def __init__(self) -> None:
+        self._cancellation = _CancellationContext()
         self._lock = threading.Lock()
         self.items: list[_Child[F]] = []
         self._closed = False
@@ -77,7 +85,7 @@ class _Children[F: Callable[..., Any]]:
     def register(
         self, fn: F, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> Iterator[_Child[F]]:
-        child = _Child(fn, args, kwargs)
+        child = _Child(fn, args, kwargs, self._cancellation)
         # No user code, runtime calls, or waits under this lock.
         with self._lock:
             if self._closed:

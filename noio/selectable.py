@@ -23,6 +23,7 @@ from typing import Self
 from typing import cast
 from typing import overload
 
+from ._cancel import current_cancellations
 from ._contextlib import ContextManager
 from ._contextlib import _ContextManagerFactory
 from ._contextlib import contextmanager
@@ -164,7 +165,7 @@ class _CallOverrides:
     _operation: type[_Operation[Any]] | type[_RoutineOperation[Any]] = _Operation
 
     def _runner(self) -> Routine[..., Any]:
-        if isinstance(self._call, Routine):
+        if isinstance(self._call, Routine) and not current_cancellations():
             runner = self._call
         else:
 
@@ -173,7 +174,7 @@ class _CallOverrides:
                 operation = self._operation(self._register, args, kwargs, self._unbound)
                 return (await select.a(cast(Any, operation)))[1]
 
-            if self._call is not None:
+            if self._call is not None and not current_cancellations():
                 runner = runner.fn(self._call)
         return runner
 
