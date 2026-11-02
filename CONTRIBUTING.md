@@ -9,6 +9,15 @@ and is a useful reference when evaluating those choices.
 Consider the reasoning behind its decisions,
 without treating them as requirements for noio.
 
+Prioritize making correct use possible,
+then making correct use easy and intuitive,
+then making incorrect use impossible.
+All three are goals, but preventing misuse often conflicts with ease of correct use.
+Resolve those conflicts in that priority order.
+
+Separate naming from implementation readiness.
+A useful implementation can remain internal while its public name is undecided.
+
 Do not attempt to retain backward compatibility between versions,
 even for features that have already been released.
 Document incompatible changes under Breaking Changes in the changelog.
@@ -50,9 +59,13 @@ At release time, turn it into a dated version entry.
 List bug fixes only when they correct behavior in a released version.
 Fold corrections to unreleased features into their feature entries instead.
 
+Develop for ordinary functions first, adding coroutine support through routines.
 Document ordinary functions and ordinary calls first.
 Present routines as advanced usage.
 Examples should default to ordinary functions and calls wherever practical.
+
+Document what callers need: usage and meaningful behavior.
+Include implementation details only when they help callers make decisions.
 
 Use semantic line breaks in Markdown prose.
 Start each sentence on a new line,
