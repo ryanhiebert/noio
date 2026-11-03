@@ -5,8 +5,8 @@ All notable changes to this project will be documented in this file.
 
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
-Unreleased
-----------
+[0.2] - 2026-11-02
+-----------------
 
 ### Added
 
@@ -68,4 +68,5 @@ Requires Python 3.15 or later.
   from a single coroutine implementation.
 - A guard against ordinary routine calls inside routine implementations.
 
+[0.2]: https://github.com/ryanhiebert/noio/releases/tag/0.2
 [0.1]: https://github.com/ryanhiebert/noio/releases/tag/0.1

@@ -1,6 +1,6 @@
 [project]
 name = "noio"
-version = "0.1"
+version = "0.2"
 description = "Experimental coroutine libraries for ordinary-function applications"
 readme = "README.md"
 license = "MIT"
