@@ -10,6 +10,10 @@ Unreleased
 
 ### Added
 
+- `noio.Queue` for buffered FIFO queues with selectable puts and gets,
+  bounded or unbounded capacity, and draining or immediate shutdown.
+  Operations that cannot continue after shutdown raise `noio.ShutDown`.
+
 - `noio.Event` for persistent completion.
 
 - `noio.cancel` for cancellation scopes with explicit cancellation, a shared timeout, and shielding,

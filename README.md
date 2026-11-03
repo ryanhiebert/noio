@@ -11,32 +11,36 @@ Use `routine` to support ordinary and coroutine calls with one interface.
 Wait for the first operation to complete
 ---------------------------------------
 
-<!-- Replace this hypothetical example with a real noio example when one is available. -->
-
-Suppose a library provides connections with a selectable `receive` method.
-Ordinary calls wait for data from each connection in turn:
+Queues provide selectable `get` and `put` methods.
+Ordinary calls wait for values from each queue in turn:
 
 ```python
-primary_data = primary.receive(4096)
-secondary_data = secondary.receive(4096)
+from noio import Queue
+
+primary = Queue[str]()
+secondary = Queue[str]()
+
+# Producers in other threads or tasks put values into these queues.
+primary_value = primary.get()
+secondary_value = secondary.get()
 ```
 
 The first call waits for `primary`, even if `secondary` already has data available.
-Use `select` to receive from whichever connection can deliver first:
+Use `select` to get a value from whichever queue can deliver first:
 
 ```python
 from noio.select import select
 
-index, data = select(
-    primary.receive.select(4096),
-    secondary.receive.select(4096),
+index, value = select(
+    primary.get.select(),
+    secondary.get.select(),
 )
 ```
 
-Each operation requests up to 4096 bytes.
-If `primary` wins, `index` is `0` and `data` contains its received bytes.
-If `secondary` wins, `index` is `1` and `data` contains its received bytes.
-See [selection](noio/select.md) for usage.
+If `primary` wins, `index` is `0` and `value` comes from `primary`.
+If `secondary` wins, `index` is `1` and `value` comes from `secondary`.
+The other queue keeps its values for a later get.
+See [selection](noio/select.md) and [queues](noio/queue.md) for usage.
 
 Support ordinary and coroutine calls
 ------------------------------------
