@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
+Unreleased
+----------
+
+### Fixed
+
+- Queue, Event, and selection operations no longer stall every thread
+  for milliseconds at a time on free-threaded CPython 3.15.
+  Each operation used to create decorated functions,
+  and renaming a function there pauses all threads in the process.
+
 [0.2] - 2026-11-02
 -----------------
 

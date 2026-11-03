@@ -407,3 +407,16 @@ def test_two_queues_compete_for_one_selection(backend: str, putting: bool) -> No
         assert all(not queue._getters and not queue._putters for queue in queues)
 
     anyio.run(main, backend=backend)
+
+
+def test_operations_do_not_decorate_functions(
+    function_metadata_writes: list[str],
+) -> None:
+    queue = Queue[int]()
+    queue.put(1)
+    assert queue.get() == 1
+    queue.put(2)
+    assert select(queue.get.select(), queue.put.select(3)) == (0, 2)
+    assert select(queue.get.select(), queue.put.select(3)) == (1, None)
+    assert queue.get() == 3
+    assert function_metadata_writes == []

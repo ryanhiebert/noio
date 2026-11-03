@@ -65,16 +65,25 @@ class Queue[T]:
             if not (self._getters and self._queue):
                 return
 
+    # Withdrawal must finish even if cancellation interrupted registration.
+    # Decorate once: shielding wraps functions, and modifying function
+    # metadata per call stops the world on free-threaded Python.
+    @shield
+    @routine
+    async def _withdraw_getter(self, guard: SelectorGuard[T]) -> None:
+        async with self._lock:
+            self._getters.pop(guard, None)
+
+    @shield
+    @routine
+    async def _withdraw_putter(self, guard: SelectorGuard[None]) -> None:
+        async with self._lock:
+            self._putters.pop(guard, None)
+
     @selectable
     @contextmanager
     async def get(self, guard: SelectorGuard[T]) -> AsyncIterator[None]:
         """Wait for and remove the oldest value, or raise ShutDown after draining."""
-
-        @shield
-        @routine
-        async def cleanup() -> None:
-            async with self._lock:
-                self._getters.pop(guard, None)
 
         try:
             async with self._lock:
@@ -89,18 +98,12 @@ class Queue[T]:
                 await self._notify.a()
             yield
         finally:
-            await cleanup.a()
+            await self._withdraw_getter.a(guard)
 
     @selectable
     @contextmanager
     async def put(self, guard: SelectorGuard[None], value: T) -> AsyncIterator[None]:
         """Wait for space and store value, or raise ShutDown after shutdown."""
-
-        @shield
-        @routine
-        async def cleanup() -> None:
-            async with self._lock:
-                self._putters.pop(guard, None)
 
         try:
             async with self._lock:
@@ -116,7 +119,7 @@ class Queue[T]:
                 await self._notify.a()
             yield
         finally:
-            await cleanup.a()
+            await self._withdraw_putter.a(guard)
 
     @shield
     @routine

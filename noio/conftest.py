@@ -1,3 +1,4 @@
+import functools
 import subprocess
 import sys
 import sysconfig
@@ -8,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from time import sleep
+from types import FunctionType
 from typing import Any
 from typing import Protocol
 
@@ -158,3 +160,23 @@ def sync_runtime(request: pytest.FixtureRequest) -> RunSync:
             assert result.returncode == 0, result.stdout + result.stderr
 
     return run
+
+
+@pytest.fixture
+def function_metadata_writes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record functions renamed through functools while the test runs.
+
+    Free-threaded CPython 3.15 stops the world when a function's name,
+    qualified name, module, or docstring is assigned, so operations must
+    not create decorated functions per call.
+    """
+    writes: list[str] = []
+    update_wrapper = functools.update_wrapper
+
+    def recording(wrapper: Any, wrapped: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(wrapper, FunctionType):
+            writes.append(getattr(wrapped, "__qualname__", repr(wrapped)))
+        return update_wrapper(wrapper, wrapped, *args, **kwargs)
+
+    monkeypatch.setattr(functools, "update_wrapper", recording)
+    return writes

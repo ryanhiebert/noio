@@ -732,3 +732,36 @@ configured(1, unknown=True)  # reject
         result.stdout
     )
     assert all(item["severity"] == "error" for item in diagnostics), result.stdout
+
+
+def test_method_binding_does_not_decorate_functions(
+    function_metadata_writes: list[str], async_runtime: AsyncRuntime
+) -> None:
+    class Resource:
+        @contextmanager
+        async def open(self) -> AsyncIterator[int]:
+            yield 1
+
+        @classmethod
+        @contextmanager
+        async def named(cls) -> AsyncIterator[str]:
+            yield cls.__name__
+
+    resource = Resource()
+
+    async def main() -> list[str]:
+        # Runtimes may decorate main itself: only record work inside it.
+        function_metadata_writes.clear()
+        async with resource.open() as value:
+            assert value == 1
+        async with Resource.named() as name:
+            assert name == "Resource"
+        return list(function_metadata_writes)
+
+    assert async_runtime.run(main) == []
+    function_metadata_writes.clear()
+    with resource.open() as value:
+        assert value == 1
+    with Resource.named() as name:
+        assert name == "Resource"
+    assert function_metadata_writes == []

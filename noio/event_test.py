@@ -514,3 +514,13 @@ def test_two_events_compete_for_one_selection(backend: str) -> None:
         await second.wait.a()
 
     anyio.run(main, backend=backend)
+
+
+def test_wait_does_not_decorate_functions(
+    function_metadata_writes: list[str],
+) -> None:
+    event = Event()
+    event.set()
+    event.wait()
+    assert select(event.wait.select()) == (0, None)
+    assert function_metadata_writes == []

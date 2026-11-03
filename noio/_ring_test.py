@@ -248,3 +248,22 @@ def test_cancellation_withdraws_waiting_contribution(backend: str) -> None:
         assert not ring._waiters
 
     anyio.run(main, backend=backend)
+
+
+def test_exchange_does_not_decorate_functions(
+    function_metadata_writes: list[str],
+) -> None:
+    ring = Ring[str](2)
+    states = [_Selection[str](), _Selection[str]()]
+    registrations = [
+        ring.exchange.select(value).__select__(
+            SelectorGuard(_Selector(state, 0), state._lock)
+        )
+        for value, state in zip("AB", states, strict=True)
+    ]
+    for registration in registrations:
+        registration.__enter__()
+    assert [state.wait() for state in states] == [(0, "B"), (0, "A")]
+    for registration in reversed(registrations):
+        registration.__exit__(None, None, None)
+    assert function_metadata_writes == []

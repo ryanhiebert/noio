@@ -73,18 +73,20 @@ class Ring[T]:
                 for guard in guards:
                     del self._waiters[guard]
 
+    # Withdrawal must finish even if cancellation interrupted matching
+    # or the subsequent wait. Registration itself remains cancellable.
+    # Decorate once: shielding wraps functions, and modifying function
+    # metadata per call stops the world on free-threaded Python.
+    @shield
+    @routine
+    async def _withdraw(self, guard: SelectorGuard[T]) -> None:
+        async with self._lock:
+            self._waiters.pop(guard, None)
+
     @selectable
     @contextmanager
     async def exchange(self, guard: SelectorGuard[T], value: T) -> AsyncIterator[None]:
         """Contribute a value and receive the preceding group member's value."""
-
-        @shield
-        @routine
-        async def cleanup() -> None:
-            # Withdrawal must finish even if cancellation interrupted matching
-            # or the subsequent wait. Registration itself remains cancellable.
-            async with self._lock:
-                self._waiters.pop(guard, None)
 
         # Cover partial registration too: matching can be interrupted while
         # acquiring selection locks after the contribution has been inserted.
@@ -96,4 +98,4 @@ class Ring[T]:
                 await self._match.a()
             yield
         finally:
-            await cleanup.a()
+            await self._withdraw.a(guard)

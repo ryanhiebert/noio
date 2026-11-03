@@ -46,13 +46,15 @@ class Event:
                 else:
                     self._waiters[guard] = None
 
-        @shield
-        @routine
-        async def cleanup() -> None:
-            async with self._lock:
-                self._waiters.pop(guard, None)
-
         try:
             yield
         finally:
-            await cleanup.a()
+            await self._withdraw.a(guard)
+
+    # Decorate once: shielding wraps functions, and modifying function
+    # metadata per call stops the world on free-threaded Python.
+    @shield
+    @routine
+    async def _withdraw(self, guard: SelectorGuard[None]) -> None:
+        async with self._lock:
+            self._waiters.pop(guard, None)

@@ -180,18 +180,20 @@ class _ContextManagerFactory[**P, T]:
 
     def __get__(self, instance: Any, owner: type[Any] | None = None) -> Any:
         if self.__class_method is not None:
-            result = _ContextManagerFactory(
-                self.__class_method.__get__(instance, owner)
-            )
-            if self.__ordinary is not None:
-                cls = owner if owner is not None else type(instance)
-                result.__ordinary = MethodType(self.__ordinary, cls)
-            return result
-        if instance is None or self.__static_method:
+            target = owner if owner is not None else type(instance)
+        elif instance is None or self.__static_method:
             return self
-        result = _ContextManagerFactory(MethodType(self.__wrapped__, instance))
+        else:
+            target = instance
+        # Bind the factory created at decoration time. Creating one per access
+        # would modify new function objects, which stops the world on
+        # free-threaded Python.
+        result = copy(self)
+        result.__class_method = None
+        result.__wrapped__ = MethodType(self.__wrapped__, target)
+        result.__factory = MethodType(self.__factory, target)
         if self.__ordinary is not None:
-            result.__ordinary = MethodType(self.__ordinary, instance)
+            result.__ordinary = MethodType(self.__ordinary, target)
         return result
 
 
