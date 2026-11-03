@@ -20,10 +20,11 @@ from typing import cast
 from typing import overload
 
 from .routine import Routine
+from .routine import _cleared_call
 from .routine import _CompatibleFunctionDescriptor
 from .routine import _Mode
 from .routine import _mode
-from .routine import cleared_mode
+from .routine import _shallow_copy
 from .routine import routine
 
 
@@ -94,9 +95,9 @@ class _GeneratorContextManager[T](ContextManager[T]):
         if self.__manager is not None:
             raise RuntimeError("This context manager has already been entered")
         if _mode.get() is _Mode.DRIVEN and self.__ordinary_factory is not None:
-            manager = cleared_mode(self.__ordinary_factory)()
+            manager = _cleared_call(self.__ordinary_factory)
             self.__manager = manager
-            return cleared_mode(manager.__enter__)()
+            return _cleared_call(manager.__enter__)
         manager = self.__factory()
         self.__manager = manager
         return await manager.__aenter__()
@@ -114,7 +115,7 @@ class _GeneratorContextManager[T](ContextManager[T]):
         # Pair exit with the implementation chosen at entry, even if the
         # calling mode has changed in the meantime.
         if isinstance(manager, AbstractContextManager):
-            return cleared_mode(manager.__exit__)(exc_type, exc_value, traceback)
+            return _cleared_call(manager.__exit__, exc_type, exc_value, traceback)
         return await manager.__aexit__(exc_type, exc_value, traceback)
 
 
@@ -188,7 +189,7 @@ class _ContextManagerFactory[**P, T]:
         # Bind the factory created at decoration time. Creating one per access
         # would modify new function objects, which stops the world on
         # free-threaded Python.
-        result = copy(self)
+        result = _shallow_copy(self)
         result.__class_method = None
         result.__wrapped__ = MethodType(self.__wrapped__, target)
         result.__factory = MethodType(self.__factory, target)

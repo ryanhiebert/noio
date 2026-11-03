@@ -1353,3 +1353,59 @@ def test_routine_with_different_self_types(async_runtime: AsyncRuntime) -> None:
         assert await asynchronous.run.a() == 42
 
     async_runtime.run(main)
+
+
+def test_bound_methods_keep_wrapper_metadata() -> None:
+    def marked[F: Callable[..., Any]](fn: F) -> F:
+        setattr(fn, "marker", "kept")  # noqa: B010
+        return fn
+
+    class Counter:
+        def __init__(self, start: int) -> None:
+            self.start = start
+
+        @routine
+        @marked
+        async def add(  # pyright: ignore[reportRedeclaration]
+            self, value: int
+        ) -> int:
+            """Add to the start."""
+            return self.start + value
+
+        @add.fn
+        def add(self, value: int) -> int:
+            return self.start + value + 100
+
+        @routine
+        @classmethod
+        async def name(cls) -> str:
+            """Name the class."""
+            return cls.__name__
+
+        @cleared_mode
+        def double(self, value: int) -> int:
+            """Double plus the start."""
+            return self.start + 2 * value
+
+    first, second = Counter(1), Counter(2)
+    bound = [first.add, second.add, Counter.name, first.name, first.double]
+    for method in bound:
+        unbound = Counter.__dict__[method.__name__]
+        unbound = getattr(unbound, "__func__", unbound)
+        for attr in ("__module__", "__name__", "__qualname__", "__doc__"):
+            assert getattr(method, attr) == getattr(unbound, attr)
+        assert "self" not in signature(method).parameters
+        assert "cls" not in signature(method).parameters
+    assert getattr(first.add, "marker") == "kept"  # noqa: B009
+    assert getattr(first.add.__wrapped__, "__self__") is first  # noqa: B009
+    assert getattr(Counter.name.__wrapped__, "__self__") is Counter  # noqa: B009
+    assert getattr(first.name.__wrapped__, "__self__") is Counter  # noqa: B009
+    assert (first.add(1), second.add(1)) == (102, 103)
+    assert (first.double(3), second.double(3)) == (7, 8)
+    assert Counter.name() == first.name() == "Counter"
+
+    @routine
+    async def awaited() -> tuple[int, int, str]:
+        return await first.add.a(1), await second.add.a(1), await first.name.a()
+
+    assert asyncio.run(awaited.a()) == (2, 3, "Counter")

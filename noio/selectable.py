@@ -31,6 +31,7 @@ from ._lock import acquire
 from ._selector import Selector as Selector
 from ._selector import SelectorGuard as SelectorGuard
 from .routine import Routine
+from .routine import _shallow_copy
 from .routine import routine
 from .select import select
 
@@ -93,6 +94,12 @@ async def selectors(
     Setters record and notify immediately; callers coordinate multi-party
     completion without intervening awaits or other fallible work.
     """
+    if len(guards) == 1:
+        # Most selectables complete one participant: skip lock ordering.
+        (guard,) = guards
+        async with guard.lock:
+            yield (guard.selector if guard.selector.pending() else None,)
+        return
     if len({id(guard.lock) for guard in guards}) != len(guards):
         raise SelectionCollisionError("Guards from the same selection collide")
     async with acquire(guard.lock for guard in guards):
@@ -206,7 +213,7 @@ class _CallOverrides:
         return result
 
     def _bind(self, instance: Any, owner: type[Any] | None) -> Self:
-        result = copy(self)
+        result = _shallow_copy(self)
         if instance is None:
             result._unbound = True
         else:

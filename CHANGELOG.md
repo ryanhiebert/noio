@@ -8,6 +8,11 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 Unreleased
 ----------
 
+### Changed
+
+- Accessing routine, selectable, and context manager methods is much cheaper,
+  roughly halving the cost of queue operations and selection.
+
 ### Fixed
 
 - Queue, Event, and selection operations no longer stall every thread

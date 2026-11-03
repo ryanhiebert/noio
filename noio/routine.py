@@ -107,7 +107,7 @@ class Routine[**P, R, **F = P]:
         if self.__ordinary is not None:
             return self.__ordinary(*args, **kwargs)
         # Without an override, F defaults to the coroutine's parameters P.
-        awaited = cast(Callable[F, Coroutine[Any, Any, R]], self.a)
+        awaited = cast("Callable[F, Coroutine[Any, Any, R]]", self.a)
         iterator = awaited(*args, **kwargs).__await__()
         token = _mode.set(_Mode.DRIVEN)
         try:
@@ -156,17 +156,40 @@ class Routine[**P, R, **F = P]:
         self, instance: Any, owner: type[Any] | None = None
     ) -> Routine[..., R, ...] | Callable[..., R]:
         if self.__class_method is not None:
-            result = Routine(self.__class_method.__get__(instance, owner))
-            if self.__ordinary is not None:
-                cls = owner if owner is not None else type(instance)
-                result.__ordinary = MethodType(self.__ordinary, cls)
-            return result
-        if instance is None or self.__static_method:
+            target = owner if owner is not None else type(instance)
+        elif instance is None or self.__static_method:
             return self
-        result = Routine(MethodType(self.__fn, instance))
+        else:
+            target = instance
+        # Binding happens on every method access. Reuse metadata copied at
+        # decoration time instead of validating and wrapping again.
+        result = _shallow_copy(self, Routine)
+        method = MethodType(self.__fn, target)
+        result.__fn = method
+        result.__wrapped__ = method
+        result.__class_method = None
         if self.__ordinary is not None:
-            result.__ordinary = MethodType(self.__ordinary, instance)
+            result.__ordinary = MethodType(self.__ordinary, target)
         return result
+
+
+def _shallow_copy[T](obj: T, cls: type[T] | None = None) -> T:
+    """Copy obj's attributes into a new, uninitialized instance of cls.
+
+    Use on per-access paths: copy.copy is several times slower.
+    """
+    result = object.__new__(type(obj) if cls is None else cls)
+    result.__dict__.update(obj.__dict__)
+    return result
+
+
+def _cleared_call[**P, R](fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
+    """Call fn with the coroutine execution mode cleared."""
+    token = _mode.set(None)
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _mode.reset(token)
 
 
 class Function[**P, R]:
@@ -191,11 +214,7 @@ class Function[**P, R]:
         update_wrapper(self, self.__fn)
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R:
-        token = _mode.set(None)
-        try:
-            return self.__fn(*args, **kwargs)
-        finally:
-            _mode.reset(token)
+        return _cleared_call(self.__fn, *args, **kwargs)
 
     @overload
     def __get__[T, **B](
@@ -220,10 +239,17 @@ class Function[**P, R]:
         self, instance: Any, owner: type[Any] | None = None
     ) -> Function[..., R]:
         if self.__class_method is not None:
-            return Function(self.__class_method.__get__(instance, owner))
-        if instance is None or self.__static_method:
+            target = owner if owner is not None else type(instance)
+        elif instance is None or self.__static_method:
             return self
-        return Function(MethodType(self.__fn, instance))
+        else:
+            target = instance
+        result = _shallow_copy(self, Function)
+        method = MethodType(self.__fn, target)
+        result.__fn = method
+        result.__wrapped__ = method
+        result.__class_method = None
+        return result
 
 
 @overload
